@@ -256,7 +256,7 @@ func.decl import("json") @parse_i64(%source: buffer, %offset: i64, %length: i64)
 func.decl import("json") @parse_f64(%source: buffer, %offset: i64, %length: i64) -> (f64)
 
 // Sampling record (16 bytes): temperature f32, top_p f32, top_k i32, seed i32.
-// temperature 0 is greedy (the default); top_k 0 means "up to 64 candidates".
+// Defaults = approved sampling (temp 1.0, top_p 0.95, top_k 20; never greedy). top_k 0 means "up to 64 candidates".
 global.rodata.def @temperature_key = bytes("74656d7065726174757265")
 
 global.rodata.def @top_p_key = bytes("746f705f70")
@@ -276,9 +276,9 @@ func.def public @request_defaults(%options: buffer) -> (buffer) {
   %record = buffer.alloca<private> align(4) %bytes : buffer
   %view = buffer.view %record[%origin] : buffer -> view<4xi32>
   %c0_i32 = scalar.constant 0 : i32
-  %temperature = scalar.constant 0.0 : f32
-  %top_p = scalar.constant 1.0 : f32
-  %top_k = scalar.constant 0 : i32
+  %temperature = scalar.constant 1.0 : f32
+  %top_p = scalar.constant 0.95 : f32
+  %top_k = scalar.constant 20 : i32
   %temperature_bits = scalar.bitcast %temperature : f32 to i32
   %top_p_bits = scalar.bitcast %top_p : f32 to i32
   view.store %temperature_bits, %view[0] : i32, view<4xi32>
