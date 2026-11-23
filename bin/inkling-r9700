@@ -1,0 +1,88 @@
+#!/bin/bash
+# inkling-r9700 - Inkling-2-Mini on one AMD Radeon AI PRO R9700 with AMD Loom.
+#   inkling-r9700 install   venv + hrx-loom 0.2.0, then download the weights (~19 GB) with loom-fetch
+#   inkling-r9700 start     serve as model "local" on http://127.0.0.1:1234/v1 (OpenAI + llama.cpp-style /props)
+#   inkling-r9700 stop | status | logs
+# Layout: client -> :1234 proxy (alias "local", /props, image/memory retries) -> loom-serve :11437 on the R9700.
+# Env: INKLING_HOME (default ~/.local/share/inkling-r9700), INKLING_PORT (1234), INKLING_BACKEND_PORT (11437),
+#      INKLING_DEVICE (amdgpu://id/<32 hex>; default: the first gfx1201 GPU), INKLING_MEMORY (Loom pool, default 32256mib).
+set -u
+HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+H="${INKLING_HOME:-$HOME/.local/share/inkling-r9700}"
+VENV="$H/venv"; MODEL="$H/model"
+PORT="${INKLING_PORT:-1234}"; BPORT="${INKLING_BACKEND_PORT:-11437}"
+# 32256 MiB = 31.5 GiB of the card's 31.86 GiB. Lower it (e.g. 30gib) if the R9700 also drives a display.
+MEM="${INKLING_MEMORY:-32256mib}"
+UB=inkling-backend; UP=inkling-proxy; UW=inkling-watchdog
+c_g=$'\e[32m'; c_r=$'\e[31m'; c_0=$'\e[0m'
+die() { echo "${c_r}inkling-r9700: $*${c_0}" >&2; exit 1; }
+
+cmd_install() {
+  local py; py=$(command -v python3) || die "python3 (>= 3.12) not found"
+  "$py" -c 'import sys; sys.exit(sys.version_info < (3, 12))' || die "python3 >= 3.12 required (hrx-loom wheel)"
+  mkdir -p "$H"
+  [[ -x "$VENV/bin/loom-serve" ]] || {
+    echo "installing hrx-loom 0.2.0 into $VENV"
+    "$py" -m venv "$VENV" && "$VENV/bin/pip" install --quiet --upgrade pip && "$VENV/bin/pip" install --quiet "hrx-loom[hf]==0.2.0" \
+      || die "pip install hrx-loom failed (needs x86_64 Linux with glibc >= 2.39)"; }
+  echo "downloading Inkling-2-Mini (Unsloth UD-Q4_K_XL + DSpark drafter + BF16 mmproj, ~19 GB) into $MODEL"
+  "$VENV/bin/loom-fetch" "$HERE/package/model.json" --output "$MODEL" --no-input --no-lock || die "loom-fetch failed"
+  # the repo's programs are the source of truth: refresh them on every install
+  cp "$HERE"/package/program/*.loom "$MODEL/program/" && cp "$HERE/package/model.json" "$MODEL/model.json"
+  echo "${c_g}installed.${c_0} next: $0 start"
+}
+
+find_device() {
+  [[ -n "${INKLING_DEVICE:-}" ]] && { echo "$INKLING_DEVICE"; return; }
+  "$VENV/bin/amdf-info" --format=json 2>/dev/null | python3 -c '
+import json, sys
+gpus = [e for e in json.load(sys.stdin).get("endpoints", []) if e.get("gpu", {}).get("target") == "gfx1201"]
+if not gpus: sys.exit(1)
+if len(gpus) > 1: print("note: several gfx1201 GPUs; using the first (set INKLING_DEVICE to pick)", file=sys.stderr)
+print("amdgpu://id/" + gpus[0]["id"])'
+}
+
+backend_status() { curl -s -m 3 "http://127.0.0.1:$BPORT/v1/status" 2>/dev/null; }
+
+cmd_start() {
+  [[ -x "$VENV/bin/loom-serve" && -r "$MODEL/model.json" ]] || die "not installed - run: $0 install"
+  systemctl --user is-active -q "$UB" && { echo "already running - $0 status / $0 stop"; exit 0; }
+  ss -Htln "( sport = :$PORT )" | grep -q . && die "port $PORT is busy (set INKLING_PORT)"
+  local dev; dev=$(find_device) || die "no gfx1201 (R9700) GPU found - check: $VENV/bin/amdf-info"
+  systemctl --user reset-failed "$UB" "$UP" "$UW" >/dev/null 2>&1
+  echo "starting Loom on $dev (448K ctx, KV int8, image input; first start compiles ~2000 kernels, a few minutes)"
+  # io_uring blocked: Loom then loads the weights without keeping a second copy in system RAM.
+  systemd-run --user --quiet --unit="$UB" --working-directory="$H" \
+    -p SystemCallFilter=~io_uring_setup -p SystemCallErrorNumber=ENOSYS \
+    "$VENV/bin/loom-serve" --model="$MODEL/model.json" "--device=$dev?completion_spin_ns=4294967295" \
+    --state_slab_bytes=4mib --weight_slab_bytes=64mib --memory_bytes="$MEM" --listen="127.0.0.1:$BPORT" || die "systemd-run failed"
+  local t0=$SECONDS s
+  while :; do
+    s=$(backend_status)
+    grep -q '"phase":"idle"' <<<"$s" && break
+    if grep -qE '"phase":"failed"|"registration":"failed"' <<<"$s" || ! systemctl --user is-active -q "$UB"; then
+      journalctl --user -u "$UB" -n 15 -o cat --no-pager | cut -c1-300; systemctl --user stop "$UB"; die "Loom failed to load"; fi
+    (( SECONDS - t0 > 1800 )) && { systemctl --user stop "$UB"; die "timed out loading"; }
+    sleep 2
+  done
+  # pinned weights stay resident; an oversized request is then refused instead of evicting the model
+  curl -s -m 60 -X POST -H 'Content-Type: application/json' -d '{"model":"Inkling-2-Mini"}' "http://127.0.0.1:$BPORT/v1/models/pin" >/dev/null
+  systemd-run --user --quiet --unit="$UW" "$HERE/bin/loom-watchdog.sh" "$BPORT" Inkling-2-Mini "$UB"
+  systemd-run --user --quiet --unit="$UP" -E LOOM_NCTX=458752 -E LOOM_VISION=1 \
+    python3 -I "$HERE/bin/proxy.py" "$PORT" "$BPORT" Inkling-2-Mini
+  sleep 1
+  echo "${c_g}ready${c_0} in $((SECONDS - t0))s - http://127.0.0.1:$PORT/v1  model 'local'  (458,752 ctx, images)"
+}
+
+cmd_stop() { systemctl --user stop "$UW" "$UP" "$UB" 2>/dev/null; echo "stopped"; }
+cmd_status() {
+  for u in "$UB" "$UP" "$UW"; do printf "%-17s %s\n" "$u" "$(systemctl --user is-active "$u")"; done
+  backend_status | grep -oE '"registration":"[a-z]+"|"pinned":(true|false)|"active_requests":[0-9]+' | head -3 | tr '\n' ' '; echo
+}
+cmd_logs() { exec journalctl --user -f -n 30 -o cat -u "$UP" -u "$UB"; }
+
+case "${1:-}" in
+  install) cmd_install ;; start) cmd_start ;; stop) cmd_stop ;; status) cmd_status ;; logs) cmd_logs ;;
+  restart) cmd_stop; cmd_start ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

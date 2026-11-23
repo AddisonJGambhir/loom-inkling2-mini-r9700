@@ -1,0 +1,147 @@
+{
+ "schema_version": 1,
+ "model": {
+  "id": "Inkling-2-Mini",
+  "name": "Inkling-2-Mini for one Radeon AI PRO R9700 (Loom, int8 KV, 448K, vision)"
+ },
+ "origins": {
+  "checkpoint": {
+   "kind": "hf",
+   "repository": "unsloth/Inkling-2-Mini-GGUF",
+   "revision": "ea0c79b2ecd73669e774c8519b79bfabfddbc027"
+  },
+  "document": {
+   "kind": "url",
+   "url": "https://huggingface.co/loom-fun/unsloth-Inkling-2-Mini-loom/resolve/277f099b5003b725e099d48caa1a2c0db1f9b650/"
+  },
+  "vision": {
+   "kind": "hf",
+   "repository": "unsloth/Inkling-2-Mini-GGUF",
+   "revision": "ea0c79b2ecd73669e774c8519b79bfabfddbc027"
+  }
+ },
+ "programs": {
+  "source": {
+   "inputs": [
+    {
+     "path": "program/prepare.loom",
+     "data": [
+      {
+       "path": "weights.loom",
+       "origin": "@document/weights.loom"
+      },
+      {
+       "path": "head_weights.loom",
+       "origin": "@document/head_weights.loom"
+      },
+      {
+       "path": "llm_config.json",
+       "origin": "@document/llm_config.json"
+      }
+     ]
+    },
+    {
+     "path": "program/control.loom"
+    },
+    {
+     "path": "program/storage.loom"
+    },
+    {
+     "path": "program/service.loom"
+    },
+    {
+     "path": "program/vision_prepare.loom"
+    },
+    {
+     "path": "program/vision_control.loom"
+    }
+   ],
+   "libraries": [
+    {
+     "path": "program/llm.loom"
+    },
+    {
+     "path": "program/vision_stages.loom"
+    },
+    {
+     "path": "program/vision_encoder.loom"
+    }
+   ]
+  }
+ },
+ "services": {
+  "chat": {
+   "kind": "text",
+   "version": 1,
+   "components": {
+    "image": {
+     "version": 1
+    }
+   }
+  }
+ },
+ "variants": {
+  "gguf": {
+   "services": {
+    "chat": {
+     "programs": [
+      "source"
+     ],
+     "config": {
+      "llm.card": true,
+      "llm.logits": false
+     },
+     "parameters": {
+      "model": {
+       "files": [
+        {
+         "path": "parameter/Inkling-2-Mini-UD-Q4_K_XL.gguf",
+         "format": "gguf",
+         "origin": "@checkpoint/Inkling-2-Mini-UD-Q4_K_XL.gguf"
+        }
+       ]
+      },
+      "draft": {
+       "files": [
+        {
+         "path": "parameter/dspark-Inkling-2-Mini-Q8_0.gguf",
+         "format": "gguf",
+         "origin": "@checkpoint/dspark-Inkling-2-Mini-Q8_0.gguf"
+        }
+       ]
+      },
+      "vision": {
+       "files": [
+        {
+         "path": "parameter/mmproj-BF16.gguf",
+         "format": "gguf",
+         "origin": "@vision/mmproj-BF16.gguf"
+        }
+       ]
+      }
+     },
+     "tokenizers": {
+      "text": {
+       "path": "tokenizer.json",
+       "origin": "@document/tokenizer.json"
+      }
+     }
+    }
+   }
+  }
+ },
+ "presets": {
+  "chat": {
+   "service": "chat",
+   "variant": "gguf",
+   "programs": "source",
+   "execution": {
+    "rows": 1,
+    "context_capacity": 458752,
+    "prefill_capacity": 2048,
+    "max_tokens": 8192,
+    "draft_depth": 3
+   }
+  }
+ }
+}

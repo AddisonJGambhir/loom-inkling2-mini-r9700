@@ -1,0 +1,14 @@
+loom-inkling2-mini-r9700
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This repository contains modified versions of Loom programs from:
+  - loom-fun/unsloth-Inkling-2-Mini-loom (Hugging Face, Apache-2.0), revision 277f099b5003b725e099d48caa1a2c0db1f9b650:
+    program/llm.loom, storage.loom, prepare.loom, service.loom
+  - Yanuk-K Inkling-2-Mini Loom vision port (Hugging Face, Apache-2.0):
+    program/control.loom, vision_control.loom, vision_encoder.loom, vision_prepare.loom, vision_stages.loom,
+    and the mixed text/image embedding kernel in llm.loom
+Modifications (2026): RDNA4 (gfx12) attention kernels, sampled top-k rewrite, int8 paged KV cache
+(llm.loom, storage.loom), R9700 context/drafter settings in model.json. See tools/ for the scripts.
+
+Runs on AMD Loom (hrx-loom, https://github.com/ROCm/hrx-system), Apache-2.0 WITH LLVM-exception, installed from PyPI.
+Model weights (downloaded at install time, not redistributed): unsloth/Inkling-2-Mini-GGUF (Apache-2.0).
