@@ -59,9 +59,14 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
 - frees the held conversation and retries once when Loom refuses an image turn for memory
 - optional **KV budget guard** (`LOOM_TOKEN_BUDGET`, off by default). It admits a chat only if all running chats' prompt + reply
   reservation fit the budget; otherwise the chat waits in a FIFO queue (`LOOM_QUEUE_TIMEOUT`, default 1800 s). `GET /budget` shows usage.
-- **`prefix-diff` diagnostics** (on; `LOOM_PREFIX_DIFF=0` turns them off). When a client re-sends a conversation with an earlier message
-  changed, or sends assistant turns back without their reasoning, it logs which message changed and how (fields and lengths only, never
-  content). Both break Loom's turn-to-turn reuse.
+- **`prefix-diff` / `echo` diagnostics** (on; `LOOM_PREFIX_DIFF=0` turns them off). Loom continues a conversation from its idle row only
+  if the client re-sends the history exactly as generated. The proxy logs an earlier message that changed, an assistant turn whose content,
+  reasoning or tool calls differ from what the model generated, render-affecting settings that changed (reasoning_effort, tools, ...), a
+  changed system prompt, and image parts. Fields, lengths and flags only, never content.
+- **tool-argument restore** (on; `LOOM_ARG_RESTORE=0` turns it off): some agents re-serialize the tool-call arguments they send back (same
+  JSON value, different spacing/escaping), which breaks reuse on every turn. The proxy restores the exact generated string when the echoed
+  arguments parse to the same JSON. Values are never changed.
+- **tool-parameter alias** (on; `LOOM_PARAM_ALIAS=0` turns it off): see the `image_url` item under Known limits.
 - optional **vision offload** (`LOOM_VISION_OFFLOAD=1`): image parts are described by Loom's own vision in a side request (temperature 0,
   cached by image hash) and sent as text, so image turns no longer force Loom 0.2.0 to re-read the whole conversation. The model then
   works from the description instead of the pixels. Screenshot loop at 37K: follow-up turns 99.96% cached, ~0.2 s to first token.
@@ -91,8 +96,9 @@ KV read rises from ~128 to ~413 GB/s. With 4 chats decoding at ~60K each, combin
 (-0.6%), 4K/32K prefill and the prefill stall are unchanged within noise. **It is not bit-exact** (different float summation
 order). Greedy outputs matched the stock kernel on 2/2 long-context prompts (16K, 47K) and on 4/5 short prompts; the one
 divergence is at a near-tie inside reasoning. Needle retrieval passed at 133K and 260K, and with 2 x 260K + 45K concurrent.
-With the drafter on (the default profile), single-chat decode verifies 4-token spans, which still use the stock span kernel.
-So the gain there is expected to be small; not measured.
+With the drafter on (the default profile), decode verifies 4-token spans, which still use the stock span kernel. Measured with
+the drafter on: 76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K. That is slower than drafter-off v2 beyond ~8K, so the
+concurrent profile turns the drafter off. (A lane-grouped multi-token span kernel was tried and gave no measurable gain.)
 
 ### Running several chats: `INKLING_PROFILE=concurrent`
 ```bash
