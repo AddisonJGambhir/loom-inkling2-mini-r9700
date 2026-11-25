@@ -49,11 +49,67 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
    K/V position goes from 2048 to 1088 bytes. This applies to the 16 full-attention planes only; the 1024-token
    sliding-window ring and the DSpark drafter stay f16. Long prompts also prefill faster, because attention reads half the bytes.
 5. **Drafter**: DSpark speculative decoding at depth 3.
+6. **Decode attention v2** (`tools/gen_attn_split_v2.py SRC DST --span`): rewrites the single-token decode attention
+   `g_ink_attn_split` and adds `g_ink_attn_split_span_v2`. The new kernel is dispatched for pure-decode epochs, where every
+   span is one token (`t == spans`). Multi-token spans keep the stock span kernel. See below.
 
 `bin/proxy.py` sits in front of Loom on :1234:
 - serves the `local` alias and `/props`
 - replaces images in older turns with a placeholder, so long conversations stay cacheable
 - frees the held conversation and retries once when Loom refuses an image turn for memory
+- optional **KV budget guard** (`LOOM_TOKEN_BUDGET`, off by default). It admits a chat only if all running chats' prompt + reply
+  reservation fit the budget; otherwise the chat waits in a FIFO queue (`LOOM_QUEUE_TIMEOUT`, default 1800 s). `GET /budget` shows usage.
+- **`prefix-diff` diagnostics** (on; `LOOM_PREFIX_DIFF=0` turns them off). When a client re-sends a conversation with an earlier message
+  changed, or sends assistant turns back without their reasoning, it logs which message changed and how (fields and lengths only, never
+  content). Both break Loom's turn-to-turn reuse.
+- optional **system-prompt checkpoints** (`LOOM_SYS_CHECKPOINT=1` with `LOOM_CHECKPOINT_CAPACITY>0` and a card `checkpoint_capacity`).
+  New conversations reuse a shared long system prompt without Loom's prefix cache; see below.
+
+### Decode attention v2
+The stock decode attention gives each of the 3 query heads of a KV head its own wave. Each lane holds 4 of the 128 dims and walks
+keys one at a time: per key and head, 4-byte K and V loads, two 2-byte scale loads, and a 32-lane reduction; the 3 waves load the
+same K/V. On the R9700 that reads the int8 KV cache at ~128 GB/s, so long-context decode is bound by memory-instruction issue.
+v2 uses one wave per KV head for all 3 query heads. Lane = 4 key slots x 8 dim chunks, with 16-byte K/V loads, an 8-lane
+xor reduction (the relative-position bias for keys within 1024 is folded in), and a per-slot online softmax merged at the end.
+Same arguments, grid, int8 dequant (f16 round trip kept) and partial layout, so `g_ink_attn_combine` is unchanged.
+
+Single-chat decode, drafter off (one R9700 with a 210 W cap that also drives a display; tok/s, 600-token replies):
+
+| context | stock | v2 |
+|--|--:|--:|
+| 8K | 84.1 | 88.3 |
+| 30K | 67.3 | 81.4 |
+| 60K | 52.4 | 73.5 |
+| 121K | 36.6 | 61.9 |
+
+KV read rises from ~128 to ~413 GB/s. With 4 chats decoding at ~60K each, combined throughput is ~+24%. Short-context decode
+(-0.6%), 4K/32K prefill and the prefill stall are unchanged within noise. **It is not bit-exact** (different float summation
+order). Greedy outputs matched the stock kernel on 2/2 long-context prompts (16K, 47K) and on 4/5 short prompts; the one
+divergence is at a near-tie inside reasoning. Needle retrieval passed at 133K and 260K, and with 2 x 260K + 45K concurrent.
+With the drafter on (the default profile), single-chat decode verifies 4-token spans, which still use the stock span kernel.
+So the gain there is expected to be small; not measured.
+
+### Running several chats: `INKLING_PROFILE=concurrent`
+```bash
+INKLING_PROFILE=concurrent bin/inkling-r9700 start
+```
+This writes `model-concurrent.json` (rows 4, `max_sessions` 4, 262,144 context per chat, drafter off, prefix cache off,
+`checkpoint_capacity` 2) and starts the proxy with a 570,000-token budget (`INKLING_TOKEN_BUDGET`) and system-prompt checkpoints.
+In Loom 0.2.0, `rows` is only an initial capacity hint. Rows share one elastic KV pool, ~17.4 KB per context token with the
+drafter off (16 x 1088 B int8 KV) or ~21.5 KB with it. The budget was validated on a ~31 GB pool: 2 x 260K + 45K at once peaked
+at 29.4 GB. If you lower `INKLING_MEMORY`, lower the budget too. Turn-to-turn reuse comes from idle rows (~97-99.9% of the prompt
+cached on follow-up turns) as long as the client re-sends the history exactly as generated, including `reasoning_content`.
+*The launcher profile itself was checked offline only.* The same settings were validated in a different (Docker) launcher.
+
+### System-prompt checkpoints
+Loom's named checkpoints only fork when a request's history extends the pinned history exactly, and `reasoning_effort` and
+`tools` must match because the template renders them. So, the second time a new conversation arrives with the same system prompt,
+tools, tool_choice and reasoning_effort, the proxy runs a seed `[system, "Reply with only the word: ok"]`. Loom only pins a
+naturally finished reply. The proxy pins it, inserts the same 2-message seed after the system prompt of every new conversation with
+that key (and on their later turns), and sends `X-Loom-Checkpoint` on each conversation's first request. At most
+`LOOM_CHECKPOINT_CAPACITY` pins (LRU); pinned tokens come off the KV budget; a refused fork is retried plain.
+18K-token system prompt + tools: a new conversation takes ~0.9-1.8 s instead of ~5.2 s (18,423 tokens cached).
+**Trade-off: the model sees one extra short exchange after the system prompt.**
 
 `bin/loom-watchdog.sh` restarts and re-pins the model if Loom ever marks it failed.
 
@@ -61,7 +117,14 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
 - **Turns that contain an image are not prefix-cached by Loom 0.2.0**: an image turn re-processes the whole conversation
   (~190 s at 300K tokens). Text turns after it are cached again, because the proxy swaps old images for a placeholder.
 - 512K loads, but it fills the card (32.4 GB) and was unreliable, so the card is set to 448K.
-- One conversation is served at a time (`rows: 1`).
+- One conversation is served at a time (`rows: 1`) in the default profile; see `INKLING_PROFILE=concurrent`.
+- **Loom 0.2.0 fails the whole model instead of rejecting a request** when live conversations overcommit the KV pool
+  ("model residency is waiting for capacity"). Streams then return empty HTTP 200 until a restart; `loom-watchdog.sh` restarts it.
+  Reproduced with 4 x ~101K concurrent prompts at 262K context per row and no admission control. Hence the proxy budget guard.
+- **Prefix-cache endpoints are never evicted** once `prefix_cache_capacity` is full, so later conversations get only the first
+  2048-token block. Each endpoint also holds recurrent state, and they block reclaim of idle histories: with 512 endpoints the
+  model failed after ~30. The concurrent profile turns the prefix cache off.
+- `continuation_epochs: 2` requires a nonzero `draft_depth` (startup fails with INVALID_ARGUMENT otherwise).
 - int8 KV is near-lossless in our tests (needle retrieval at 75K and 440K, same BetterBench speed). It is still a
   quantization of the attention cache. If you suspect it, compare against the f16 package.
 
