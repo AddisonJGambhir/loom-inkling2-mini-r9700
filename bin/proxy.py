@@ -220,6 +220,254 @@ class PrefixDiff:
 PREFIX_DIFF = PrefixDiff() if os.environ.get("LOOM_PREFIX_DIFF", "1") != "0" else None
 
 
+class EchoCheck:
+    """Generated-vs-echoed diagnostics (2026-11-24). Loom continues a conversation from its idle row only if the client
+    re-sends each assistant turn exactly as it was generated. The proxy records what the model produced (from the JSON
+    reply or the SSE stream). On the conversation's next request it compares the echoed assistant turn field by field
+    (content, reasoning, tool calls) and logs what differs. It also logs a system prompt that changed between turns
+    (same first user message) and requests that carry real image parts (Loom re-reads every image turn in full).
+    Lengths and match flags only, never content. Off with LOOM_PREFIX_DIFF=0."""
+
+    def __init__(self, keep=64):
+        from collections import OrderedDict
+        self.keep = keep; self.lock = threading.Lock(); self.gen = OrderedDict(); self.sys = OrderedDict()
+        self.params = OrderedDict(); self.extra = {}
+
+    @staticmethod
+    def _h(x):
+        import hashlib
+        return hashlib.sha1(json.dumps(x, sort_keys=True).encode()).hexdigest()[:12]
+
+    def key(self, msgs):
+        if not isinstance(msgs, list) or len(msgs) < 2:
+            return None
+        return self._h(msgs[0]) + self._h(msgs[1])
+
+    RENDER_KEYS = ("reasoning_effort", "tools", "tool_choice", "parallel_tool_calls", "response_format",
+                   "chat_template_kwargs", "thinking", "reasoning")
+
+    def check(self, msgs, req=None):
+        k = self.key(msgs)
+        if not k:
+            return
+        notes = []
+        if isinstance(req, dict):
+            params = {rk: self._h(req.get(rk)) for rk in self.RENDER_KEYS if req.get(rk) is not None}
+            with self.lock:
+                prev_p = self.params.get(k); self.params[k] = params
+                while len(self.params) > self.keep:
+                    self.params.popitem(last=False)
+            if prev_p is not None and prev_p != params:
+                ch = sorted(rk for rk in set(prev_p) | set(params) if prev_p.get(rk) != params.get(rk))
+                notes.append(f"request settings changed since the last turn: {ch} (rendered into the prompt; breaks reuse)")
+        extra = sorted({kk for m in msgs if isinstance(m, dict) and m.get("role") == "assistant" for kk in m}
+                       - {"role", "content", "reasoning_content", "reasoning", "tool_calls"})
+        if extra:
+            with self.lock:
+                seen = self.extra.get(k); self.extra[k] = extra
+            if seen != extra:
+                notes.append(f"assistant turns carry extra fields {extra}")
+        images = _image_parts(msgs)
+        if images:
+            notes.append(f"{images} image part(s) in this request (Loom re-reads image turns in full)")
+        k1 = self._h(msgs[1]); sh = self._h(msgs[0])
+        with self.lock:
+            prev_sys = self.sys.get(k1)
+            self.sys[k1] = (sh, len(json.dumps(msgs[0])))
+            while len(self.sys) > self.keep:
+                self.sys.popitem(last=False)
+            g = self.gen.get(k)
+        continuing = any(isinstance(m, dict) and m.get("role") == "assistant" for m in msgs)
+        if prev_sys and prev_sys[0] != sh and continuing:
+            notes.append(f"system prompt changed since the last turn (len {prev_sys[1]} -> {len(json.dumps(msgs[0]))}); nothing can be reused")
+        if g:
+            n_prev, gm = g
+            if len(msgs) > n_prev and isinstance(msgs[n_prev], dict) and msgs[n_prev].get("role") == "assistant":
+                e = msgs[n_prev]; diffs = []
+                ec = _text(e.get("content")) or ""; gc = gm.get("content") or ""
+                if ec != gc:
+                    diffs.append(f"content {'stripped' if ec.strip() == gc.strip() else 'changed'} ({len(gc)} -> {len(ec)})")
+                er = e.get("reasoning_content") if isinstance(e.get("reasoning_content"), str) else e.get("reasoning")
+                gr = gm.get("reasoning") or ""
+                if gr and not er:
+                    diffs.append(f"reasoning dropped ({len(gr)} chars generated)")
+                elif (er or "") != gr:
+                    diffs.append(f"reasoning changed ({len(gr)} -> {len(er or '')})")
+                et = [((t.get("function") or {}).get("name"), (t.get("function") or {}).get("arguments")) for t in e.get("tool_calls") or []]
+                gt = [(t.get("name"), t.get("arguments")) for t in gm.get("tool_calls") or []]
+                ei = [t.get("id") for t in e.get("tool_calls") or []]
+                gi = [t.get("id") for t in gm.get("tool_calls") or []]
+                if [x[0] for x in et] != [x[0] for x in gt]:
+                    diffs.append(f"tool calls changed ({len(gt)} -> {len(et)})")
+                elif any(g and x != g for x, g in zip(ei, gi)):
+                    diffs.append("tool-call ids changed")
+                elif et != gt:
+                    diffs.append("tool-call arguments re-serialized (" + ", ".join(
+                        f"{len(a or '')}->{len(b or '')}" for (_, a), (_, b) in zip(gt, et)) + ")")
+                if diffs:
+                    notes.append(f"assistant turn {n_prev} differs from what was generated: " + "; ".join(diffs))
+            elif len(msgs) <= n_prev:
+                notes.append(f"history shorter than last request ({n_prev} -> {len(msgs)} messages): compacted or truncated")
+        for n in notes:
+            log(f"  echo conv {k[:8]}: {n}")
+
+    def record(self, msgs, gm):
+        k = self.key(msgs)
+        if not k or not gm:
+            return
+        with self.lock:
+            self.gen[k] = (len(msgs), gm); self.gen.move_to_end(k)
+            while len(self.gen) > self.keep:
+                self.gen.popitem(last=False)
+
+
+ECHO = EchoCheck() if os.environ.get("LOOM_PREFIX_DIFF", "1") != "0" else None
+
+
+class ArgRestore:
+    """Undo clients' re-serialization of tool-call arguments (2026-11-24). Some agents (e.g. Hermes) parse the arguments
+    JSON the model generated and send back their own serialization (different spacing/escaping, same value). Loom then
+    sees a history that no longer matches the generated tokens and re-reads the whole conversation on every turn.
+    The proxy remembers each generated arguments string (keyed by tool name + canonical JSON), and when an echoed
+    tool call parses to the same JSON, it restores the original string. Values are never changed.
+    Off with LOOM_ARG_RESTORE=0."""
+
+    def __init__(self, keep=2048):
+        from collections import OrderedDict
+        self.keep = keep; self.lock = threading.Lock(); self.map = OrderedDict(); self.restored = 0
+
+    @staticmethod
+    def _canon(name, args):
+        import hashlib
+        try:
+            v = json.loads(args)
+        except Exception:
+            return None
+        return hashlib.sha1((str(name) + "\x00" + json.dumps(v, sort_keys=True, ensure_ascii=False)).encode()).hexdigest()
+
+    def record(self, tool_calls):
+        for t in tool_calls or []:
+            a = t.get("arguments")
+            if isinstance(a, str):
+                c = self._canon(t.get("name"), a)
+                if c:
+                    with self.lock:
+                        self.map[c] = a; self.map.move_to_end(c)
+                        while len(self.map) > self.keep:
+                            self.map.popitem(last=False)
+
+    def apply(self, msgs):
+        n = 0
+        for m in msgs or []:
+            if not (isinstance(m, dict) and m.get("role") == "assistant" and m.get("tool_calls")):
+                continue
+            for t in m["tool_calls"]:
+                fn = t.get("function") if isinstance(t, dict) else None
+                if not isinstance(fn, dict):
+                    continue
+                a = fn.get("arguments")
+                if isinstance(a, dict):   # some clients send parsed objects
+                    a = json.dumps(a)
+                if not isinstance(a, str):
+                    continue
+                c = self._canon(fn.get("name"), a)
+                with self.lock:
+                    orig = self.map.get(c) if c else None
+                if orig is not None and orig != fn.get("arguments"):
+                    fn["arguments"] = orig; n += 1
+        if n:
+            with self.lock:
+                self.restored += n
+        return n
+
+
+ARGS = ArgRestore() if os.environ.get("LOOM_ARG_RESTORE", "1") != "0" else None
+
+class ParamAlias:
+    """Hide tool parameters named "image_url" from Loom 0.2.0 (2026-11-24). loom-serve treats any request whose JSON has
+    an "image_url" key as a vision request, even when it is just a tool parameter (Hermes's vision_analyze). That request
+    is rendered without turn-to-turn reuse (every turn re-reads the whole conversation) and its tool-call output parser
+    sometimes fails ("trailing JSON input", HTTP 500). Measured on Hermes's 20 tools: 0 of 12,380 cached; without
+    vision_analyze, 11,981 of 11,989. (Escaping the key in JSON keeps reuse but changes how Loom renders the schema, so the
+    model then calls it with a wrong key; not used.)
+    So the proxy renames such parameters in the tool schemas it sends (image_url -> image_ref), renames them in the
+    history's tool calls the same way, and renames them back in the model's tool calls before the client sees them.
+    Streamed arguments of an aliased tool are held and sent in one piece, renamed, with the finishing chunk.
+    Message content parts (real images) are not touched. Off with LOOM_PARAM_ALIAS=0."""
+    MAP = {"image_url": "image_ref"}
+
+    @staticmethod
+    def _rename(obj, mapping):
+        return {mapping.get(k, k): v for k, v in obj.items()} if isinstance(obj, dict) else obj
+
+    def rewrite_request(self, j):
+        tools = j.get("tools")
+        if not isinstance(tools, list):
+            return None
+        aliased, new_tools = {}, []
+        for t in tools:
+            fn = t.get("function") if isinstance(t, dict) else None
+            params = fn.get("parameters") if isinstance(fn, dict) else None
+            props = params.get("properties") if isinstance(params, dict) else None
+            ren = ({k: a for k, a in self.MAP.items() if k in props and a not in props} if isinstance(props, dict) else {})
+            if not ren:
+                new_tools.append(t); continue
+            t2 = json.loads(json.dumps(t)); p2 = t2["function"]["parameters"]
+            p2["properties"] = self._rename(p2["properties"], ren)
+            if isinstance(p2.get("required"), list):
+                p2["required"] = [ren.get(x, x) for x in p2["required"]]
+            aliased[fn.get("name")] = ren; new_tools.append(t2)
+        if not aliased:
+            return None
+        j["tools"] = new_tools
+        for m in j.get("messages") or []:
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                for tc in m.get("tool_calls") or []:
+                    f = tc.get("function") if isinstance(tc, dict) else None
+                    if isinstance(f, dict) and f.get("name") in aliased:
+                        f["arguments"] = self._args(f.get("arguments"), aliased[f["name"]])
+        return aliased
+
+    def _args(self, a, mapping):
+        try:
+            v = json.loads(a) if isinstance(a, str) else a
+        except Exception:
+            return a
+        if not isinstance(v, dict):
+            return a
+        return json.dumps(self._rename(v, mapping), ensure_ascii=False)
+
+    def to_client(self, name, args, aliased):
+        back = {v: k for k, v in aliased.get(name, {}).items()}
+        return self._args(args, back) if back else args
+
+
+ALIAS = ParamAlias() if os.environ.get("LOOM_PARAM_ALIAS", "1") != "0" else None
+
+CAPTURE_DIR = os.environ.get("LOOM_CAPTURE_DIR", "/work/results/live/capture")
+
+
+def _capture(kind, seq, data):
+    """Diagnostics only: while CAPTURE_DIR/ON exists, keep the last 12 chat requests (as sent to Loom) and the replies
+    the model generated, as private files (0600), for replaying a reuse miss. Remove ON (and the files) to stop."""
+    try:
+        if not os.path.exists(os.path.join(CAPTURE_DIR, "ON")):
+            return
+        path = os.path.join(CAPTURE_DIR, f"{seq:06d}-{kind}.json")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data if isinstance(data, bytes) else json.dumps(data).encode())
+        old = sorted(x for x in os.listdir(CAPTURE_DIR) if x.endswith(".json"))
+        for x in old[:-24]:
+            os.remove(os.path.join(CAPTURE_DIR, x))
+    except Exception as e:
+        log(f"  capture error: {e!r}")
+
+
+_CAP_SEQ = [0]
+_CAP_LOCK = threading.Lock()
+
+
 class SysCheckpoints:
     """Reuse a shared long system prompt across NEW conversations via Loom named checkpoints (2026-11-24).
 
@@ -374,19 +622,48 @@ SYSCKPT = (SysCheckpoints(int(os.environ.get("LOOM_CHECKPOINT_CAPACITY", "2") or
            if os.environ.get("LOOM_SYS_CHECKPOINT") == "1" and int(os.environ.get("LOOM_CHECKPOINT_CAPACITY", "0") or 0) > 0 else None)
 
 
+def _image_parts(msgs):
+    """Number of real image parts in the messages (not mere mentions of 'image_url' in text or tool schemas)."""
+    n = 0
+    for m in msgs or []:
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            n += sum(1 for p in c if _is_image_part(p))
+    return n
+
+
+IMAGE_TOKENS = int(os.environ.get("LOOM_IMAGE_TOKENS", "4096"))   # budget reservation per image (conservative)
+
+
 def _estimate_cost(j):
     """Prompt tokens (exact via Loom when the request has no image) + reply reservation."""
     prompt = None
-    raw = json.dumps(j.get("messages") or [])
-    if "image_url" not in raw and '"input_image"' not in raw:
+    msgs = j.get("messages") or []
+    images = _image_parts(msgs)
+    if not images:
         try:
             q = dict(j); q.pop("stream", None); q.pop("stream_options", None)
             prompt = int(_post_backend("/v1/chat/completions/input_tokens", q, timeout=120).get("input_tokens") or 0) or None
         except Exception:
             prompt = None
-    if prompt is None:   # images or counting failed: text chars / 3 (conservative for this tokenizer) + 3000 per image
-        text = sum(len(_text(m.get("content")) or "") for m in j.get("messages") or [] if isinstance(m, dict))
-        prompt = text // 3 + 3000 * raw.count("image_url") + 1024
+    if prompt is None:   # images (counting would run the vision path) or counting failed: tokenize the text exactly
+        parts = []
+        for m in msgs:
+            if isinstance(m, dict):
+                parts.append(_text(m.get("content")) or "")
+                for k in ("reasoning_content", "reasoning"):
+                    if isinstance(m.get(k), str):
+                        parts.append(m[k]); break
+                if m.get("tool_calls"):
+                    parts.append(json.dumps(m["tool_calls"]))
+        if j.get("tools"):
+            parts.append(json.dumps(j["tools"]))
+        text = "\n".join(parts)
+        try:
+            ntext = len(_post_backend("/tokenize", {"model": TAG, "content": text}, timeout=120).get("tokens") or [])
+        except Exception:
+            ntext = len(text) // 2   # this tokenizer averages ~1.5-2 chars/token on code and JSON
+        prompt = int(ntext * 1.05) + 64 * len(msgs) + IMAGE_TOKENS * images + 1024
     nctx = int(os.environ.get("LOOM_NCTX") or 0) or 1 << 30
     gen = j.get("max_completion_tokens") or j.get("max_tokens") or CARD_MAX_TOKENS
     try:
@@ -517,7 +794,8 @@ class Proxy(BaseHTTPRequestHandler):
 
     def _relay(self, method):
         t0 = time.time()
-        self._ck = None; self._plain_body = None; self._plain_msgs = None
+        self._ck = None; self._plain_body = None; self._plain_msgs = None; self._echo_msgs = None; self._aliased = None
+        gen = {"content": "", "reasoning": "", "tc": {}}
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else None
         model_in = None
@@ -528,6 +806,18 @@ class Proxy(BaseHTTPRequestHandler):
                 j = json.loads(body)
                 if isinstance(j, dict) and isinstance(j.get("messages"), list):
                     j["messages"] = normalize_messages(j["messages"])
+                    if ALIAS:
+                        try:
+                            self._aliased = ALIAS.rewrite_request(j)
+                        except Exception as ex:
+                            log(f"  param-alias error: {ex!r}"); self._aliased = None
+                    if ARGS:
+                        try:
+                            nres = ARGS.apply(j["messages"])
+                            if nres:
+                                log(f"  restored {nres} re-serialized tool-call argument string(s) to the generated form")
+                        except Exception as ex:
+                            log(f"  arg-restore error: {ex!r}")
                     _apply_sampling(j)
                 plain_msgs = None
                 if (SYSCKPT and isinstance(j, dict) and isinstance(j.get("messages"), list)
@@ -564,19 +854,31 @@ class Proxy(BaseHTTPRequestHandler):
             except Exception:
                 jb = None
             if isinstance(jb, dict):
+                self._echo_msgs = self._plain_msgs if self._plain_msgs is not None else jb.get("messages")
                 if PREFIX_DIFF:
                     try:
-                        PREFIX_DIFF.check(self._plain_msgs if self._plain_msgs is not None else jb.get("messages"))
+                        PREFIX_DIFF.check(self._echo_msgs)
                     except Exception as e:
                         log(f"  prefix-diff error: {e!r}")
+                if ECHO:
+                    try:
+                        ECHO.check(self._echo_msgs, jb)
+                    except Exception as e:
+                        log(f"  echo error: {e!r}")
                 cost, ptok = _estimate_cost(jb)
-                label = f"prompt {ptok:,}" + (" (est)" if "image_url" in body.decode("utf-8", "ignore") else "")
+                label = f"prompt {ptok:,}" + (" (est, images)" if _image_parts(jb.get("messages")) else "")
                 self._ticket = BUDGET.admit(cost, label)
                 if self._ticket is None:
                     self._send_json(503, {"error": {"message": f"Loom busy: waited {BUDGET.timeout:.0f}s for {cost:,} tokens of KV budget",
                                                     "type": "server_error", "code": "budget_timeout"}})
                     log(f"{method} {self.path} 503 budget queue timeout (cost {cost:,})")
                     return
+        self._cap = None
+        if method == "POST" and body and self.path.split("?", 1)[0].rstrip("/") in ("/v1/chat/completions", "/chat/completions"):
+            with _CAP_LOCK:
+                _CAP_SEQ[0] += 1; self._cap = _CAP_SEQ[0]
+            _capture("req", self._cap, {"headers": {k: v for k, v in headers.items() if k.lower().startswith("x-loom")},
+                                        "body": json.loads(body)})
         meter = LiveMeter(body) if (LIVE and stream and method == "POST" and body and "chat/completions" in self.path) else None
         try:
             c, r = self._backend(method, body, headers)
@@ -713,15 +1015,17 @@ class Proxy(BaseHTTPRequestHandler):
         first = None; first_tok = None; total = 0; usage = None
         sse = "text/event-stream" in (r.getheader("Content-Type") or "")
         buf = b""; raw = b"" if not sse else None
-        def note_event(ev):   # inspect one SSE event; return False to drop it
+        held = {}; tc_name = {}   # ParamAlias: streamed arguments of aliased tools, held until the call finishes
+        def note_event(ev):   # inspect one SSE event; return the bytes to forward (possibly rewritten), or None to drop it
             nonlocal first_tok, usage
+            out_lines = []; drop = False
             for line in ev.split(b"\n"):
                 if not line.startswith(b"data:") or line.strip() == b"data: [DONE]":
-                    continue
+                    out_lines.append(line); continue
                 try:
                     d = json.loads(line[5:])
                 except Exception:
-                    continue
+                    out_lines.append(line); continue
                 if d.get("usage"):
                     usage = d["usage"]
                 ch = d.get("choices") or []
@@ -735,9 +1039,45 @@ class Proxy(BaseHTTPRequestHandler):
                                 meter.text(dl[k])
                         for tc in dl.get("tool_calls") or []:
                             meter.text(((tc.get("function") or {}).get("arguments")) or "")
+                for c_ in ch:   # accumulate what the model generated (for EchoCheck)
+                    dl = c_.get("delta") or {}
+                    if isinstance(dl.get("content"), str):
+                        gen["content"] += dl["content"]
+                    for k in ("reasoning_content", "reasoning"):
+                        if isinstance(dl.get(k), str):
+                            gen["reasoning"] += dl[k]; break
+                    for tc in dl.get("tool_calls") or []:
+                        slot = gen["tc"].setdefault(tc.get("index", 0), {"name": None, "arguments": "", "id": None})
+                        if tc.get("id"):
+                            slot["id"] = tc["id"]
+                        fn = tc.get("function") or {}
+                        if fn.get("name"):
+                            slot["name"] = fn["name"]
+                        if isinstance(fn.get("arguments"), str):
+                            slot["arguments"] += fn["arguments"]
                 if strip_usage and d.get("usage") and not ch:
-                    return False
-            return True
+                    drop = True; continue
+                if self._aliased:
+                    changed = False
+                    for c_ in ch:
+                        dl = c_.get("delta") or {}
+                        for tc in dl.get("tool_calls") or []:
+                            i = tc.get("index", 0); fn = tc.get("function") or {}
+                            if fn.get("name"):
+                                tc_name[i] = fn["name"]
+                            if tc_name.get(i) in self._aliased and isinstance(fn.get("arguments"), str):
+                                held[i] = held.get(i, "") + fn["arguments"]; fn["arguments"] = ""; changed = True
+                        if c_.get("finish_reason") and held:
+                            dl.setdefault("tool_calls", [])
+                            for i in sorted(held):
+                                dl["tool_calls"].append({"index": i, "function": {"arguments": ALIAS.to_client(tc_name[i], held[i], self._aliased)}})
+                            c_["delta"] = dl; held.clear(); changed = True
+                    if changed:
+                        line = b"data: " + json.dumps(d, ensure_ascii=False).encode()
+                out_lines.append(line)
+            if drop and not any(l.startswith(b"data:") for l in out_lines):
+                return None
+            return b"\n".join(out_lines)
         while True:
             chunk = r.read1(65536)
             if not chunk:
@@ -749,9 +1089,11 @@ class Proxy(BaseHTTPRequestHandler):
                 buf += chunk
                 parts = buf.split(b"\n\n")
                 buf = parts.pop()
-                out = b"".join(p + b"\n\n" for p in parts if note_event(p))
-            elif raw is not None and len(raw) < 4 << 20:
+                out = b"".join(e + b"\n\n" for e in (note_event(p) for p in parts) if e is not None)
+            elif raw is not None and (len(raw) < 4 << 20 or self._aliased):
                 raw += chunk
+                if self._aliased:
+                    out = b""   # sent after renaming, below
             try:
                 if out:
                     self.wfile.write(out); self.wfile.flush()
@@ -760,15 +1102,59 @@ class Proxy(BaseHTTPRequestHandler):
                 break
         if sse and buf:
             try:
-                if note_event(buf):
-                    self.wfile.write(buf); self.wfile.flush()
+                e = note_event(buf)
+                if e is not None:
+                    self.wfile.write(e); self.wfile.flush()
             except (BrokenPipeError, ConnectionResetError):
                 pass
+        if raw and self._aliased:
+            try:
+                rj = json.loads(raw)
+                for ch_ in rj.get("choices") or []:
+                    for t in ((ch_.get("message") or {}).get("tool_calls") or []):
+                        f = t.get("function") or {}
+                        f["_raw_args"] = f.get("arguments")
+                        f["arguments"] = ALIAS.to_client(f.get("name"), f.get("arguments"), self._aliased)
+                client = json.loads(json.dumps(rj))
+                for ch_ in client.get("choices") or []:
+                    for t in ((ch_.get("message") or {}).get("tool_calls") or []):
+                        (t.get("function") or {}).pop("_raw_args", None)
+                self.wfile.write(json.dumps(client, ensure_ascii=False).encode()); self.wfile.flush()
+                for ch_ in rj.get("choices") or []:   # keep the generated (aliased) form for ArgRestore/EchoCheck
+                    for t in ((ch_.get("message") or {}).get("tool_calls") or []):
+                        f = t.get("function") or {}; f["arguments"] = f.pop("_raw_args", f.get("arguments"))
+                raw = json.dumps(rj).encode()
+            except Exception as e:
+                log(f"  param-alias reply error: {e!r}")
+                try:
+                    self.wfile.write(raw); self.wfile.flush()
+                except Exception:
+                    pass
         if raw:
             try:
-                usage = json.loads(raw).get("usage") or usage
+                rj = json.loads(raw)
+                usage = rj.get("usage") or usage
+                mm = ((rj.get("choices") or [{}])[0].get("message") or {})
+                gen["content"] = mm.get("content") or ""
+                gen["reasoning"] = mm.get("reasoning_content") or mm.get("reasoning") or ""
+                gen["tc"] = {i: {"name": (t.get("function") or {}).get("name"), "arguments": (t.get("function") or {}).get("arguments"),
+                                 "id": t.get("id")} for i, t in enumerate(mm.get("tool_calls") or [])}
             except Exception:
                 pass
+        if self._cap and r.status == 200:
+            _capture("gen", self._cap, {"content": gen["content"], "reasoning": gen["reasoning"],
+                                        "tool_calls": [gen["tc"][i] for i in sorted(gen["tc"])], "usage": usage})
+        if ARGS and r.status == 200 and gen["tc"]:
+            try:
+                ARGS.record([gen["tc"][i] for i in sorted(gen["tc"])])
+            except Exception as e:
+                log(f"  arg-restore record error: {e!r}")
+        if ECHO and self._echo_msgs is not None and r.status == 200:
+            try:
+                ECHO.record(self._echo_msgs, {"content": gen["content"], "reasoning": gen["reasoning"],
+                                              "tool_calls": [gen["tc"][i] for i in sorted(gen["tc"])]})
+            except Exception as e:
+                log(f"  echo record error: {e!r}")
         c.close()
         if meter: meter.done()
         self.close_connection = True
