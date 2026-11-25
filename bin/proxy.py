@@ -19,10 +19,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-# Proxy-only settings that can change with a proxy reload (no Loom restart): KEY=VALUE lines in $LOOM_PROXY_ENV
-# (default /work/proxy.env, i.e. ~/loom-probe/proxy.env). They override the process environment.
+# Proxy-only settings that can change by restarting just the proxy (no Loom restart): KEY=VALUE lines in $LOOM_PROXY_ENV
+# (default: proxy.env in the repo root, next to bin/). They override the process environment.
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 try:
-    for _ln in open(os.environ.get("LOOM_PROXY_ENV", "/work/proxy.env")):
+    for _ln in open(os.environ.get("LOOM_PROXY_ENV") or os.path.join(REPO_ROOT, "proxy.env")):
         _ln = _ln.strip()
         if _ln and not _ln.startswith("#") and "=" in _ln:
             _k, _v = _ln.split("=", 1)
@@ -535,7 +536,7 @@ class VisionOffload:
 
 VOFF = VisionOffload() if os.environ.get("LOOM_VISION_OFFLOAD") == "1" else None
 
-CAPTURE_DIR = os.environ.get("LOOM_CAPTURE_DIR", "/work/results/live/capture")
+CAPTURE_DIR = os.environ.get("LOOM_CAPTURE_DIR") or os.path.join(REPO_ROOT, "capture")
 
 
 def _capture(kind, seq, data):
