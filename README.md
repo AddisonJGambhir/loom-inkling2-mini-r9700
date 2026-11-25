@@ -12,7 +12,7 @@ A tuned [AMD Loom](https://github.com/ROCm/hrx-system) package for **Inkling-2-M
 | images | text only | **yes** (verified after 300K tokens of text) |
 | R9700 kernels | RDNA3 attention tiles | RDNA4 (gfx12) WMMA attention kernels |
 
-All numbers were measured on one R9700 (Ubuntu 26.04, hrx-loom 0.2.0) with the model pinned and `--memory_bytes=32256mib`.
+All numbers were measured on one R9700 (Ubuntu 26.04, hrx-loom 0.2.0; re-validated on 0.3.0, same results within ~3%) with the model pinned and `--memory_bytes=32256mib`.
 
 ## Requirements
 - AMD Radeon AI PRO R9700 (32 GB, gfx1201). It works best when the card is **not** driving your display

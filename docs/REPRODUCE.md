@@ -34,8 +34,9 @@ The changes come in three independent parts. You can take any of them:
 - AMD Radeon AI PRO R9700 (gfx1201, 32 GB). Other gfx12 cards should work but are untested. The kernel is not target-specific, so
   RDNA3 cards would also get it, also untested.
 - Linux with the in-kernel `amdgpu` driver, Python >= 3.12, about 20 GB of disk.
-- **hrx-loom 0.2.0** (what the package installs). Loom 0.3.0 is out and is said to run 0.2 packages unchanged, but these changes
-  have not been tested on it yet.
+- **hrx-loom 0.2.0** (what the package installs) or **0.3.0**. All of this was also validated on 0.3.0 (`pip install "hrx-loom[hf]==0.3.0"`
+  in the package venv): every verify check passes, output is token-identical to 0.2.0 on our equivalence tests, and speed is the same
+  within ~2-3%.
 
 ## Path A: the upstream PR is merged, or you use the fork branch
 
@@ -136,14 +137,15 @@ With the drafter on, decode verifies 4-token spans through the span kernel, whic
 76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K, against 88 / 81 / 74 / 62 with the drafter off and v2. The drafter
 still helps short-context single-chat coding (+17-29%) but costs ~19% of the KV budget. The concurrent profile turns it off.
 
-## Loom 0.2.0 behaviours to know about
+## Loom behaviours to know about (0.2.0; 0.3.0 differences noted)
 
-- **Overcommitting the KV pool fails the whole model.** Streams end as empty HTTP 200s until a restart.
-  `bin/loom-watchdog.sh` restarts it; the budget guard prevents it.
-- **Prefix-cache entries are never evicted.** Once full, later conversations get no reuse from them, and they block memory reclaim.
-  Keep `prefix_cache_capacity` at 0 with several chats.
+- **0.2.0: overcommitting the KV pool fails the whole model.** Streams end as empty HTTP 200s until a restart.
+  `bin/loom-watchdog.sh` restarts it; the budget guard prevents it. **Fixed in 0.3.0:** Loom queues a request that does not fit.
+  The guard is still useful there (it keeps the queue in the proxy, with a timeout).
+- **Prefix-cache entries are never replaced.** Once full, later conversations get no reuse from them (still true on 0.3.0).
+  On 0.2.0 they also block memory reclaim and can fail the model; 0.3.0 no longer fails. Keep `prefix_cache_capacity` at 0 with several chats.
 - **A tool parameter named `image_url` turns a request into an image request** (no reuse, occasional "trailing JSON input" 500).
-  The proxy alias handles it.
+  Still true on 0.3.0. The proxy alias handles it.
 - **Image turns are always re-read in full.** Vision offload (`LOOM_VISION_OFFLOAD=1`) replaces images with a description from
   Loom's own vision, so the conversation stays cacheable. The model then works from the description, not the pixels.
 - **`continuation_epochs: 2` needs the drafter.**

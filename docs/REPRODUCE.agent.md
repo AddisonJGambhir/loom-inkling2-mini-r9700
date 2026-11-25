@@ -18,9 +18,10 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 | `UPSTREAM_PR` | `https://github.com/AddisonJGambhir/loom-inkling2-mini-r9700/pull/1` | `gh pr view 1 --repo AddisonJGambhir/loom-inkling2-mini-r9700 --json state` |
 
 ## Invariants (never violate)
-1. Do not enable the prefix cache (`prefix_cache_capacity > 0`) together with several rows. Loom 0.2.0 never evicts its endpoints,
-   and they block memory reclaim (the model fails).
-2. Do not run several long chats without the proxy budget guard (`LOOM_TOKEN_BUDGET`). KV overcommit fails the whole model.
+1. Do not enable the prefix cache (`prefix_cache_capacity > 0`) together with several rows. Loom never replaces its endpoints (0.2.0 and 0.3.0),
+   and on 0.2.0 they block memory reclaim (the model fails).
+2. Do not run several long chats without the proxy budget guard (`LOOM_TOKEN_BUDGET`). On 0.2.0, KV overcommit fails the whole model
+   (0.3.0 queues instead; keep the guard anyway).
 3. Do not set `continuation_epochs: 2` with `draft_depth: 0`. Startup fails with INVALID_ARGUMENT.
 4. Do not restart Loom while the user's clients are mid-request. Check `curl -s $PROXY/budget` (`"active": 0`) or ask.
    A Loom restart may push clients with a cloud fallback onto that fallback.
@@ -33,7 +34,7 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 |--|--|--|--|
 | 0.1 | `python3 -c "import sys; assert sys.version_info >= (3,12)"` | exit 0 | stop: Python too old |
 | 0.2 | `"$HOME_DIR/venv/bin/amdf-info" --format=json \| grep -c gfx1201` | >= 1 (or not installed yet) | not an R9700: warn the user (untested hardware) |
-| 0.3 | `"$HOME_DIR/venv/bin/pip" show hrx-loom \| grep Version` | `0.2.0` | 0.3.x: untested; tell the user, continue only if they agree |
+| 0.3 | `"$HOME_DIR/venv/bin/pip" show hrx-loom \| grep Version` | `0.2.0` or `0.3.0` (both validated) | another version: untested; tell the user, continue only if they agree |
 | 0.4 | `gh pr view 1 --repo AddisonJGambhir/loom-inkling2-mini-r9700 --json state --jq .state` | `MERGED` -> Path A from upstream; otherwise Path A from the fork, or Path B | — |
 
 ## Path A (merged upstream, or the fork branch)
@@ -68,7 +69,7 @@ Budget rule: `17.2 GiB + 3.6 GiB + budget x 17.4 KB <= pool - 1.5 GB` (drafter o
 | V2 | `systemctl --user restart inkling-proxy` (untested with transient units), or `bin/inkling-r9700 restart` (also restarts Loom) | proxy log line ends with `vision offload: on` | check that `proxy.env` sits next to `bin/` |
 
 ## Verify (all must PASS)
-| # | run | expect (reference: R9700, 210 W cap, 0.2.0) |
+| # | run | expect (reference: R9700, 210 W cap, 0.2.0; 0.3.0 within ~3%) |
 |--|--|--|
 | T1 | `python3 -I tools/verify_r9700.py --proxy $PROXY --backend $BACKEND kernel` (add `--stock /tmp/llm.stock.loom` on Path B) | `PASS`; `regenerated_identically: true` with `--stock` |
 | T2 | `... decode` (~2 min, loads the GPU) | `PASS`, ratio >= 0.75 (reference 0.873; stock ~0.68) |
