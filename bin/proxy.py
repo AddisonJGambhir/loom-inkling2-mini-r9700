@@ -109,6 +109,294 @@ class LiveMeter:
         self.stop.set()
 
 
+class TokenBudget:
+    """Admission guard for Loom's shared KV pool (2026-11-24).
+
+    Loom's elastic pool has no per-request reservation: if the live conversations together outgrow physical memory,
+    Loom fails the whole model ("model residency is waiting for capacity") and every stream returns an empty 200.
+    So the proxy admits a chat only if (sum of admitted costs) + this cost <= LOOM_TOKEN_BUDGET, where
+    cost = prompt tokens + reply reservation (max_tokens, capped by the context). Requests queue FIFO; a request
+    always gets in when nothing else is running. Idle cached histories are not counted: Loom reclaims them under
+    pressure (verified 2026-11-24 with 5 x 91K chats over 4 cached ones).
+    """
+
+    def __init__(self, budget, max_active, timeout):
+        self.budget, self.max_active, self.timeout = budget, max_active, timeout
+        self.cv = threading.Condition(); self.used = 0; self.active = {}; self.queue = []; self.seq = 0
+        self.pinned = 0   # tokens pinned by system-prompt checkpoints (SysCheckpoints)
+
+    def admit(self, cost, label):
+        with self.cv:
+            self.seq += 1; t = self.seq; self.queue.append((t, cost))
+            t0 = time.time(); waited = False
+            while True:
+                head = self.queue[0][0] == t
+                fits = self.used + cost <= self.budget - self.pinned and len(self.active) < self.max_active
+                if head and (fits or not self.active):
+                    break
+                if not waited:
+                    waited = True
+                    log(f"  queued {label}: cost {cost:,} tok; in use {self.used:,}/{self.budget - self.pinned:,} by {len(self.active)}, "
+                        f"{len(self.queue) - 1} ahead/behind")
+                left = self.timeout - (time.time() - t0)
+                if left <= 0:
+                    self.queue = [q for q in self.queue if q[0] != t]; self.cv.notify_all()
+                    return None
+                self.cv.wait(min(left, 5))
+            self.queue.pop(0); self.active[t] = cost; self.used += cost; self.cv.notify_all()
+            log(f"  admitted {label}: cost {cost:,} tok; in use {self.used:,}/{self.budget - self.pinned:,} by {len(self.active)}"
+                + (f" after {time.time() - t0:.1f}s queued" if waited else ""))
+            return t
+
+    def release(self, t):
+        with self.cv:
+            self.used -= self.active.pop(t, 0); self.cv.notify_all()
+
+    def status(self):
+        with self.cv:
+            return {"budget_tokens": self.budget, "pinned_tokens": self.pinned, "in_use_tokens": self.used, "active": len(self.active),
+                    "max_active": self.max_active, "queued": len(self.queue), "queue_timeout_s": self.timeout}
+
+
+BUDGET = TokenBudget(int(os.environ.get("LOOM_TOKEN_BUDGET", "0") or 0),
+                     int(os.environ.get("LOOM_MAX_SESSIONS", "0") or 0) or 1 << 30,
+                     float(os.environ.get("LOOM_QUEUE_TIMEOUT", "1800")))
+CARD_MAX_TOKENS = int(os.environ.get("LOOM_MAX_TOKENS", "48000"))
+
+
+class PrefixDiff:
+    """Prefix-reuse diagnostics (2026-11-24). Loom only reuses a conversation's cached state when the client
+    re-sends earlier turns exactly as before (and an assistant turn exactly as generated). For each chat request,
+    fingerprint every message; if a request continues a known conversation (same first two messages) but an
+    earlier message changed, log where and how: which index, role, which fields appeared or vanished, and
+    length changes. Never logs content. Off with LOOM_PREFIX_DIFF=0."""
+
+    def __init__(self, keep=32):
+        self.keep = keep; self.convs = {}; self.lock = threading.Lock()
+
+    @staticmethod
+    def _shape(m):
+        out = {}
+        for k, v in m.items():
+            if v in (None, "", [], {}):
+                continue
+            out[k] = len(v) if isinstance(v, str) else len(json.dumps(v, sort_keys=True))
+        return out
+
+    def check(self, msgs):
+        import hashlib
+        if not isinstance(msgs, list) or len(msgs) < 2:
+            return
+        fp = [hashlib.sha1(json.dumps(m, sort_keys=True).encode()).hexdigest()[:12] for m in msgs]
+        key = fp[0] + fp[1]
+        # Inkling always generates reasoning; an assistant turn sent back without any reasoning field no longer
+        # matches what was generated, so Loom cannot continue the resident row past it (measured: 97% -> 7% reuse).
+        bare = sum(1 for m in msgs if isinstance(m, dict) and m.get("role") == "assistant"
+                   and not (m.get("reasoning_content") or m.get("reasoning")))
+        with self.lock:
+            if bare and self.convs.get(key, (None, None, 0))[2:] != (bare,):
+                log(f"  prefix-diff conv {key[:8]}: {bare} assistant turn(s) sent back without reasoning - "
+                    f"limits Loom's turn-to-turn reuse")
+            prev = self.convs.pop(key, None)
+            self.convs[key] = (fp, [self._shape(m) if isinstance(m, dict) else {} for m in msgs], bare)
+            while len(self.convs) > self.keep:
+                self.convs.pop(next(iter(self.convs)))
+        if not prev:
+            return
+        pfp, pshape = prev[0], prev[1]
+        i = next((k for k in range(min(len(pfp), len(fp))) if pfp[k] != fp[k]), None)
+        if i is None:
+            if len(fp) < len(pfp):
+                log(f"  prefix-diff conv {key[:8]}: history shrank {len(pfp)} -> {len(fp)} messages (truncated/compacted)")
+            return
+        a, b = pshape[i], self._shape(msgs[i]) if isinstance(msgs[i], dict) else {}
+        gone = sorted(set(a) - set(b)); new = sorted(set(b) - set(a))
+        changed = {k: f"{a[k]}->{b[k]}" for k in set(a) & set(b) if a[k] != b[k]}
+        role = msgs[i].get("role") if isinstance(msgs[i], dict) else "?"
+        log(f"  prefix-diff conv {key[:8]}: message {i}/{len(pfp)} ({role}) changed since the last request; "
+            f"fields gone {gone} new {new} length {changed or ('unchanged' if gone or new else 'same, content edited')} - Loom must re-read from here")
+
+
+PREFIX_DIFF = PrefixDiff() if os.environ.get("LOOM_PREFIX_DIFF", "1") != "0" else None
+
+
+class SysCheckpoints:
+    """Reuse a shared long system prompt across NEW conversations via Loom named checkpoints (2026-11-24).
+
+    With Loom's prefix cache off (it never evicted and blocked memory reclaim), a new conversation re-reads its whole
+    system prompt + tool declarations (18K tokens: ~4.5 s). Loom's checkpoints are explicit pins, but a request can only
+    fork one if its history *extends* the pinned history exactly. So, the second time a new conversation arrives with
+    the same (system prompt, tools, tool_choice, reasoning_effort), the proxy runs a tiny seed conversation:
+    [system, "Reply with only the word: ok"] -> a naturally finished reply. It pins that as a checkpoint, then inserts
+    the same two seed messages after the system prompt of every new conversation with that key (and on all of that
+    conversation's later turns, so turn-to-turn reuse is unaffected), and sends X-Loom-Checkpoint. The model therefore
+    sees one extra short exchange at the start of such conversations. At most LOOM_CHECKPOINT_CAPACITY pins (LRU
+    replaced); pinned tokens are subtracted from the KV budget. If Loom rejects a fork, the request is retried plain.
+    Off unless LOOM_SYS_CHECKPOINT=1. Small prompts (< LOOM_SYS_CKPT_MIN tokens, default 4096) are never pinned.
+    """
+    SEED_USER = "Reply with only the word: ok"
+
+    def __init__(self, cap, min_tokens):
+        from collections import OrderedDict
+        self.cap, self.min = cap, min_tokens
+        self.lock = threading.Lock()
+        self.ck = OrderedDict()   # key -> {"name", "seed", "position"}; LRU order
+        self.seen, self.bad, self.creating = {}, set(), set()
+        self.injected = OrderedDict()   # conversation id -> key
+        self.n = 0
+
+    @staticmethod
+    def _key(j):
+        import hashlib
+        m0 = j["messages"][0]
+        return hashlib.sha1(json.dumps([m0, j.get("tools"), j.get("tool_choice"), j.get("reasoning_effort")],
+                                       sort_keys=True).encode()).hexdigest()[:16]
+
+    def _call(self, method, path, body=None, hdr=None, timeout=600):
+        c = http.client.HTTPConnection("127.0.0.1", BACKEND, timeout=timeout)
+        try:
+            h = {"Content-Type": "application/json", "X-Loom-Model": TAG, **(hdr or {})}
+            data = json.dumps(body).encode() if body is not None else b""
+            h["Content-Length"] = str(len(data))
+            c.request(method, path, data, h)
+            r = c.getresponse()
+            return r.status, r.read()
+        finally:
+            c.close()
+
+    def _create(self, k, j):
+        sysm = j["messages"][0]
+        base = {k2: j[k2] for k2 in ("tools", "tool_choice", "reasoning_effort") if j.get(k2) is not None}
+        st, raw = self._call("POST", "/v1/chat/completions/input_tokens", {"model": TAG, "messages": [sysm], **base})
+        n_sys = (json.loads(raw).get("input_tokens") or 0) if st == 200 else 0
+        if n_sys < self.min:
+            log(f"  sys-ckpt {k[:8]}: system prompt {n_sys:,} tok < {self.min:,}, not pinned"); return None
+        with self.lock:
+            self.n += 1; name = f"sysp-{k[:12]}-{self.n}"
+        seed_body = {"model": TAG, "messages": [sysm, {"role": "user", "content": self.SEED_USER}], "max_tokens": 512,
+                     "temperature": 1.0, "top_p": 0.95, "top_k": 20, **base}
+        st, raw = self._call("POST", "/v1/chat/completions", seed_body, {"X-Loom-Session": name})
+        if st != 200:
+            log(f"  sys-ckpt {k[:8]}: seed failed {st} {raw[:120]!r}"); return None
+        d = json.loads(raw); ch = d["choices"][0]; m = ch.get("message") or {}
+        if ch.get("finish_reason") != "stop" or m.get("tool_calls"):
+            log(f"  sys-ckpt {k[:8]}: seed did not finish plainly ({ch.get('finish_reason')}), not pinned"); return None
+        a = {"role": "assistant", "content": m.get("content")}
+        if m.get("reasoning_content"):
+            a["reasoning_content"] = m["reasoning_content"]
+        with self.lock:   # make room (LRU)
+            old = [(kk, self.ck[kk]) for kk in list(self.ck)[: max(0, len(self.ck) - self.cap + 1)]]
+        for kk, e in old:
+            self._call("DELETE", f"/v1/checkpoints/{e['name']}")
+            with self.lock:
+                self.ck.pop(kk, None); BUDGET.pinned -= e["position"]
+            log(f"  sys-ckpt {kk[:8]}: unpinned {e['name']} (LRU)")
+        st, raw = self._call("POST", f"/v1/checkpoints/{name}", None, {"X-Loom-Session": name})
+        if st != 201:
+            log(f"  sys-ckpt {k[:8]}: pin failed {st} {raw[:120]!r}"); return None
+        pos = int(json.loads(raw).get("position") or 0)
+        e = {"name": name, "seed": [{"role": "user", "content": self.SEED_USER}, a], "position": pos}
+        with self.lock:
+            self.ck[k] = e; BUDGET.pinned += pos
+        log(f"  sys-ckpt {k[:8]}: pinned {name} at {pos:,} tokens (system {n_sys:,})")
+        return e
+
+    def apply(self, j):
+        """Insert the seed and return (checkpoint name, key, conversation id), or None to send the request unchanged."""
+        import hashlib
+        msgs = j.get("messages")
+        if not isinstance(msgs, list) or len(msgs) < 2 or not isinstance(msgs[0], dict) or msgs[0].get("role") != "system":
+            return None
+        k = self._key(j)
+        conv = hashlib.sha1((k + json.dumps(msgs[1], sort_keys=True)).encode()).hexdigest()[:16]
+        fresh = not any(isinstance(m, dict) and m.get("role") == "assistant" for m in msgs)
+        with self.lock:
+            prev = None if fresh else self.injected.get(conv)   # a fresh request (no assistant turn yet) always
+            if prev is not None:   # starts a new fork, even if its first message repeats an earlier one; a conversation we already seeded: same seed on every later turn, no header
+                self.injected.move_to_end(conv)                         # (the resident row continues it; a
+                j["messages"] = [msgs[0]] + prev[1] + msgs[1:]          # checkpoint fork would discard turn history)
+                return None
+            if k in self.bad:
+                return None
+            e = self.ck.get(k); inj = False
+            if e is None:
+                if not fresh or k in self.creating:
+                    return None
+                self.seen[k] = self.seen.get(k, 0) + 1
+                if self.seen[k] < 2:
+                    return None
+                self.creating.add(k)
+            elif not (fresh or inj):
+                return None
+        if e is None:
+            try:
+                e = self._create(k, j)
+            except Exception as ex:
+                log(f"  sys-ckpt {k[:8]}: error {ex!r}"); e = None
+            with self.lock:
+                self.creating.discard(k)
+                if e is None:
+                    self.bad.add(k); return None
+        j["messages"] = [msgs[0]] + e["seed"] + msgs[1:]
+        if not fresh:   # mid-conversation first sighting: never insert into an existing history
+            j["messages"] = msgs
+            return None
+        with self.lock:
+            if k in self.ck:
+                self.ck.move_to_end(k)
+            self.injected[conv] = (k, e["seed"]); self.injected.move_to_end(conv)
+            while len(self.injected) > 1024:
+                self.injected.popitem(last=False)
+        return e["name"], k, conv
+
+    def drop(self, k, conv, why):
+        structural = "does not extend" in why   # 400: this key can never fork -> stop; 404 (pin gone): re-create later
+        with self.lock:
+            e = self.ck.pop(k, None); self.injected.pop(conv, None)
+            if structural:
+                self.bad.add(k)
+            if e:
+                BUDGET.pinned -= e["position"]
+        if e:
+            try:
+                self._call("DELETE", f"/v1/checkpoints/{e['name']}")
+            except Exception:
+                pass
+        log(f"  sys-ckpt {k[:8]}: {'disabled' if structural else 'dropped (will re-pin)'} after fork rejection ({why[:100]})")
+
+    def status(self):
+        with self.lock:
+            return {"pinned": [{"name": e["name"], "position": e["position"]} for e in self.ck.values()],
+                    "conversations": len(self.injected), "skipped_keys": len(self.bad)}
+
+
+SYSCKPT = (SysCheckpoints(int(os.environ.get("LOOM_CHECKPOINT_CAPACITY", "2") or 2), int(os.environ.get("LOOM_SYS_CKPT_MIN", "4096")))
+           if os.environ.get("LOOM_SYS_CHECKPOINT") == "1" and int(os.environ.get("LOOM_CHECKPOINT_CAPACITY", "0") or 0) > 0 else None)
+
+
+def _estimate_cost(j):
+    """Prompt tokens (exact via Loom when the request has no image) + reply reservation."""
+    prompt = None
+    raw = json.dumps(j.get("messages") or [])
+    if "image_url" not in raw and '"input_image"' not in raw:
+        try:
+            q = dict(j); q.pop("stream", None); q.pop("stream_options", None)
+            prompt = int(_post_backend("/v1/chat/completions/input_tokens", q, timeout=120).get("input_tokens") or 0) or None
+        except Exception:
+            prompt = None
+    if prompt is None:   # images or counting failed: text chars / 3 (conservative for this tokenizer) + 3000 per image
+        text = sum(len(_text(m.get("content")) or "") for m in j.get("messages") or [] if isinstance(m, dict))
+        prompt = text // 3 + 3000 * raw.count("image_url") + 1024
+    nctx = int(os.environ.get("LOOM_NCTX") or 0) or 1 << 30
+    gen = j.get("max_completion_tokens") or j.get("max_tokens") or CARD_MAX_TOKENS
+    try:
+        gen = int(gen)
+    except Exception:
+        gen = CARD_MAX_TOKENS
+    gen = max(0, min(gen, nctx - prompt))
+    return min(prompt + gen, nctx), prompt
+
+
 def _apply_sampling(j):
     changed = []
     for k, v in SAMPLING.items():
@@ -229,6 +517,7 @@ class Proxy(BaseHTTPRequestHandler):
 
     def _relay(self, method):
         t0 = time.time()
+        self._ck = None; self._plain_body = None; self._plain_msgs = None
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else None
         model_in = None
@@ -240,6 +529,14 @@ class Proxy(BaseHTTPRequestHandler):
                 if isinstance(j, dict) and isinstance(j.get("messages"), list):
                     j["messages"] = normalize_messages(j["messages"])
                     _apply_sampling(j)
+                plain_msgs = None
+                if (SYSCKPT and isinstance(j, dict) and isinstance(j.get("messages"), list)
+                        and self.path.split("?", 1)[0].rstrip("/") in ("/v1/chat/completions", "/chat/completions")):
+                    plain_msgs = list(j["messages"]); self._plain_msgs = plain_msgs
+                    try:
+                        self._ck = SYSCKPT.apply(j)
+                    except Exception as ex:
+                        log(f"  sys-ckpt error: {ex!r}"); self._ck = None
                 if isinstance(j, dict) and "model" in j:
                     model_in = j["model"]
                     j["model"] = TAG
@@ -251,11 +548,35 @@ class Proxy(BaseHTTPRequestHandler):
                             j["stream_options"] = so
                             strip_usage = True
                     body = json.dumps(j).encode()
+                    if getattr(self, "_ck", None):
+                        jp = dict(j); jp["messages"] = plain_msgs; self._plain_body = json.dumps(jp).encode()
             except Exception:
                 pass
         headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP and k.lower() != "host"}
+        if getattr(self, "_ck", None):
+            headers["X-Loom-Checkpoint"] = self._ck[0]
         if body is not None:
             headers["Content-Length"] = str(len(body))
+        if (BUDGET.budget and method == "POST" and body
+                and self.path.split("?", 1)[0].rstrip("/") in ("/v1/chat/completions", "/chat/completions")):
+            try:
+                jb = json.loads(body)
+            except Exception:
+                jb = None
+            if isinstance(jb, dict):
+                if PREFIX_DIFF:
+                    try:
+                        PREFIX_DIFF.check(self._plain_msgs if self._plain_msgs is not None else jb.get("messages"))
+                    except Exception as e:
+                        log(f"  prefix-diff error: {e!r}")
+                cost, ptok = _estimate_cost(jb)
+                label = f"prompt {ptok:,}" + (" (est)" if "image_url" in body.decode("utf-8", "ignore") else "")
+                self._ticket = BUDGET.admit(cost, label)
+                if self._ticket is None:
+                    self._send_json(503, {"error": {"message": f"Loom busy: waited {BUDGET.timeout:.0f}s for {cost:,} tokens of KV budget",
+                                                    "type": "server_error", "code": "budget_timeout"}})
+                    log(f"{method} {self.path} 503 budget queue timeout (cost {cost:,})")
+                    return
         meter = LiveMeter(body) if (LIVE and stream and method == "POST" and body and "chat/completions" in self.path) else None
         try:
             c, r = self._backend(method, body, headers)
@@ -264,6 +585,23 @@ class Proxy(BaseHTTPRequestHandler):
             self._send_json(502, {"error": {"message": f"loom backend not reachable: {e}", "type": "server_error"}})
             log(f"{method} {self.path} 502 backend down")
             return
+        if getattr(self, "_ck", None) and r.status in (400, 404):
+            errc = r.read()
+            if b"checkpoint" in errc:   # fork rejected: drop this checkpoint and send the client's own request
+                c.close()
+                SYSCKPT.drop(self._ck[1], self._ck[2], errc.decode("utf-8", "replace"))
+                body = self._plain_body; headers.pop("X-Loom-Checkpoint", None); headers["Content-Length"] = str(len(body))
+                self._ck = None
+                try:
+                    c, r = self._backend(method, body, headers)
+                except Exception as e:
+                    self._send_json(502, {"error": {"message": f"loom backend not reachable: {e}", "type": "server_error"}})
+                    return
+            else:
+                self.send_response(r.status); self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(errc))); self.end_headers(); self.wfile.write(errc); c.close()
+                log(f"{method} {self.path} {r.status} {errc[:160]!r}")
+                return
         # Loom keeps the previous conversation resident until the next request replaces it. An image turn (rendered
         # with the generic template, so no prefix reuse) or a new long conversation can then need two copies and is
         # refused. Replace the held history with a 1-token throwaway request and retry once (2026-11-23).
@@ -454,10 +792,21 @@ class Proxy(BaseHTTPRequestHandler):
         if self.path.split("?", 1)[0].rstrip("/") == "/props":   # Pi asks /props?model=local&autoload=false
             n = self._n_ctx(); self._send_json(200, {"default_generation_settings": {"n_ctx": n}, "n_ctx": n, "modalities": {"vision": VISION, "audio": False}, "model_alias": "local", "served_tag": TAG})
             return
+        if self.path.split("?", 1)[0].rstrip("/") == "/budget":
+            st = BUDGET.status()
+            if SYSCKPT:
+                st["sys_checkpoints"] = SYSCKPT.status()
+            self._send_json(200, st)
+            return
         self._relay("GET")
 
     def do_POST(self):
-        self._relay("POST")
+        self._ticket = None; self._ck = None; self._plain_body = None; self._plain_msgs = None
+        try:
+            self._relay("POST")
+        finally:
+            if self._ticket is not None:
+                BUDGET.release(self._ticket)
 
     def do_DELETE(self):
         self._relay("DELETE")
@@ -469,5 +818,7 @@ class Proxy(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     ThreadingHTTPServer.daemon_threads = True
     srv = ThreadingHTTPServer(("127.0.0.1", LISTEN), Proxy)
-    log(f"proxy :{LISTEN} -> loom :{BACKEND} ({TAG}), model 'local' accepted")
+    log(f"proxy :{LISTEN} -> loom :{BACKEND} ({TAG}), model 'local' accepted; KV budget guard: "
+        + (f"{BUDGET.budget:,} tokens, max {BUDGET.max_active} active, queue timeout {BUDGET.timeout:.0f}s" if BUDGET.budget else "off")
+        + f"; system-prompt checkpoints: {'on, capacity ' + str(SYSCKPT.cap) if SYSCKPT else 'off'}")
     srv.serve_forever()
