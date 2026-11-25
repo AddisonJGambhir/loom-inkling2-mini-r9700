@@ -125,6 +125,9 @@ that key (and on their later turns), and sends `X-Loom-Checkpoint` on each conve
   2048-token block. Each endpoint also holds recurrent state, and they block reclaim of idle histories: with 512 endpoints the
   model failed after ~30. The concurrent profile turns the prefix cache off.
 - `continuation_epochs: 2` requires a nonzero `draft_depth` (startup fails with INVALID_ARGUMENT otherwise).
+- **A tool parameter named `image_url` turns the whole request into a vision request** in loom-serve 0.2.0. There is then no
+  turn-to-turn reuse, and "trailing JSON input" 500s happen sometimes. Agents with a vision tool hit this on every turn. `bin/proxy.py` aliases
+  such parameters to `image_ref` and maps them back (`LOOM_PARAM_ALIAS=0` to disable). Measured with a 20-tool agent: 0% -> 99.9% reuse.
 - int8 KV is near-lossless in our tests (needle retrieval at 75K and 440K, same BetterBench speed). It is still a
   quantization of the attention cache. If you suspect it, compare against the f16 package.
 
