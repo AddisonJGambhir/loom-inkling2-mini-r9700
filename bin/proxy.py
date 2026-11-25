@@ -19,6 +19,17 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+# Proxy-only settings that can change with a proxy reload (no Loom restart): KEY=VALUE lines in $LOOM_PROXY_ENV
+# (default /work/proxy.env, i.e. ~/loom-probe/proxy.env). They override the process environment.
+try:
+    for _ln in open(os.environ.get("LOOM_PROXY_ENV", "/work/proxy.env")):
+        _ln = _ln.strip()
+        if _ln and not _ln.startswith("#") and "=" in _ln:
+            _k, _v = _ln.split("=", 1)
+            os.environ[_k.strip()] = _v.strip()
+except FileNotFoundError:
+    pass
+
 LISTEN, BACKEND, TAG = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
 VISION = os.environ.get("LOOM_VISION") == "1"
 HOP = {"connection", "keep-alive", "transfer-encoding", "content-length", "proxy-connection", "upgrade", "te", "trailers"}
@@ -444,6 +455,86 @@ class ParamAlias:
 
 ALIAS = ParamAlias() if os.environ.get("LOOM_PARAM_ALIAS", "1") != "0" else None
 
+
+class VisionOffload:
+    """Describe images with Loom's own vision in a side request, and send the main conversation text-only (2026-11-24).
+    Loom 0.2.0 re-reads the whole conversation on any turn that contains an image, and the turn after it usually misses too
+    (an agent's screenshot-checking loop at ~80K context: 30-100 s per turn). With this on, each image part is replaced by
+    "[image described by the vision model] ..." text: a small separate request (that image + the agent's question from the same
+    message, temperature 0, reasoning off) asks Loom for a precise description, cached by a hash of the image, so the
+    same image always yields the same text and older turns stay byte-identical. The main model then works from the description,
+    not the pixels. If describing fails, the image is passed through unchanged. LOOM_VISION_OFFLOAD=1 enables it."""
+    PROMPT = ("You are the vision module of a coding agent that cannot see images. Describe this image so the agent can act on it "
+              "without seeing it: quote all visible text exactly, list the UI elements and their positions, colors, layout, any "
+              "errors, warnings or rendering problems, and everything relevant to the agent's question. Be precise and complete "
+              "but concise (at most about 250 words). Do not say you are describing an image; just give the description.")
+
+    def __init__(self, keep=512):
+        from collections import OrderedDict
+        self.keep = keep; self.cache = OrderedDict(); self.lock = threading.Lock(); self.described = 0
+
+    @staticmethod
+    def _url(p):
+        u = p.get("image_url") if isinstance(p, dict) else None
+        if isinstance(u, dict):
+            u = u.get("url")
+        return u if isinstance(u, str) else (p.get("image") if isinstance(p, dict) and isinstance(p.get("image"), str) else None)
+
+    def _describe(self, part, question):
+        import hashlib
+        url = self._url(part)
+        key = hashlib.sha1((url or json.dumps(part, sort_keys=True)).encode()).hexdigest()
+        with self.lock:
+            d = self.cache.get(key)
+            if d is not None:
+                self.cache.move_to_end(key); return d, False
+        q = (question or "").strip()[:2000]
+        body = {"model": TAG, "temperature": 0.0, "max_tokens": 900, "reasoning_effort": "none", "messages": [
+            {"role": "system", "content": self.PROMPT},
+            {"role": "user", "content": [{"type": "text", "text": ("The agent's question: " + q) if q else "Describe the image."},
+                                         {"type": "image_url", "image_url": {"url": url}} if url else part]}]}
+        t0 = time.time()
+        r = _post_backend("/v1/chat/completions", body, timeout=600)
+        ch = (r.get("choices") or [{}])[0]
+        d = ((ch.get("message") or {}).get("content") or "").strip()
+        if not d:
+            raise RuntimeError(f"empty description (finish {ch.get('finish_reason')})")
+        with self.lock:
+            self.cache[key] = d; self.described += 1
+            while len(self.cache) > self.keep:
+                self.cache.popitem(last=False)
+        log(f"  vision-offload: described an image in {time.time() - t0:.1f}s ({len(d)} chars, {(r.get('usage') or {}).get('prompt_tokens')} prompt tokens)")
+        return d, True
+
+    def apply(self, msgs):
+        """Replace image parts in place. Returns (images replaced, newly described)."""
+        n = new = 0
+        for m in msgs or []:
+            c = m.get("content") if isinstance(m, dict) else None
+            if not (isinstance(c, list) and any(_is_image_part(p) for p in c)):
+                continue
+            question = "\n".join(p.get("text", "") for p in c if isinstance(p, dict) and p.get("type") == "text")
+            parts = []
+            for p in c:
+                if _is_image_part(p):
+                    try:
+                        d, fresh = self._describe(p, question)
+                    except Exception as e:
+                        log(f"  vision-offload: describe failed ({e!r}); passing the image through")
+                        parts.append(p); continue
+                    parts.append({"type": "text", "text": "[image described by the vision model; the image itself is not shown]\n" + d})
+                    n += 1; new += int(fresh)
+                else:
+                    parts.append(p)
+            if all(isinstance(p, dict) and p.get("type") == "text" for p in parts):
+                m["content"] = "\n".join(p.get("text", "") for p in parts)
+            else:
+                m["content"] = parts
+        return n, new
+
+
+VOFF = VisionOffload() if os.environ.get("LOOM_VISION_OFFLOAD") == "1" else None
+
 CAPTURE_DIR = os.environ.get("LOOM_CAPTURE_DIR", "/work/results/live/capture")
 
 
@@ -720,8 +811,8 @@ def normalize_messages(msgs):
             if m["content"] is None and m.get("role") != "assistant":
                 m["content"] = ""
         out.append(m)
-    if VISION and os.environ.get("LOOM_KEEP_OLD_IMAGES") != "1":
-        out = _drop_old_images(out)
+    if VISION and os.environ.get("LOOM_KEEP_OLD_IMAGES") != "1" and not VOFF:
+        out = _drop_old_images(out)   # (with vision offload on, every image becomes its cached description instead)
     return out
 
 
@@ -806,6 +897,13 @@ class Proxy(BaseHTTPRequestHandler):
                 j = json.loads(body)
                 if isinstance(j, dict) and isinstance(j.get("messages"), list):
                     j["messages"] = normalize_messages(j["messages"])
+                    if VOFF:
+                        try:
+                            nimg, nnew = VOFF.apply(j["messages"])
+                            if nimg:
+                                log(f"  vision-offload: {nimg} image(s) sent as text ({nnew} newly described, {nimg - nnew} from cache)")
+                        except Exception as ex:
+                            log(f"  vision-offload error: {ex!r}")
                     if ALIAS:
                         try:
                             self._aliased = ALIAS.rewrite_request(j)
@@ -1206,5 +1304,6 @@ if __name__ == "__main__":
     srv = ThreadingHTTPServer(("127.0.0.1", LISTEN), Proxy)
     log(f"proxy :{LISTEN} -> loom :{BACKEND} ({TAG}), model 'local' accepted; KV budget guard: "
         + (f"{BUDGET.budget:,} tokens, max {BUDGET.max_active} active, queue timeout {BUDGET.timeout:.0f}s" if BUDGET.budget else "off")
-        + f"; system-prompt checkpoints: {'on, capacity ' + str(SYSCKPT.cap) if SYSCKPT else 'off'}")
+        + f"; system-prompt checkpoints: {'on, capacity ' + str(SYSCKPT.cap) if SYSCKPT else 'off'}"
+        + f"; vision offload: {'on' if VOFF else 'off'}")
     srv.serve_forever()

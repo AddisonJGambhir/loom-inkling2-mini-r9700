@@ -62,6 +62,10 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
 - **`prefix-diff` diagnostics** (on; `LOOM_PREFIX_DIFF=0` turns them off). When a client re-sends a conversation with an earlier message
   changed, or sends assistant turns back without their reasoning, it logs which message changed and how (fields and lengths only, never
   content). Both break Loom's turn-to-turn reuse.
+- optional **vision offload** (`LOOM_VISION_OFFLOAD=1`): image parts are described by Loom's own vision in a side request (temperature 0,
+  cached by image hash) and sent as text, so image turns no longer force Loom 0.2.0 to re-read the whole conversation. The model then
+  works from the description instead of the pixels. Screenshot loop at 37K: follow-up turns 99.96% cached, ~0.2 s to first token.
+- proxy-only settings can live in `$LOOM_PROXY_ENV` (default `/work/proxy.env`), read at proxy start.
 - optional **system-prompt checkpoints** (`LOOM_SYS_CHECKPOINT=1` with `LOOM_CHECKPOINT_CAPACITY>0` and a card `checkpoint_capacity`).
   New conversations reuse a shared long system prompt without Loom's prefix cache; see below.
 
