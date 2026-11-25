@@ -101,25 +101,29 @@ the drafter on: 76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K. That i
 concurrent profile turns the drafter off. (A lane-grouped multi-token span kernel was tried and gave no measurable gain.)
 
 ### Prefill attention: 4 tiles per workgroup
-`g_ink_attention_flash2_ts2_rdna4` (gfx12 prefill attention, made by `tools/gen_flash2_multi.py --nsub 4 --key-major` on top of v2).
+`g_ink_attention_flash2_ts2_rdna4` (gfx12 prefill attention, made by `tools/gen_flash2_multi.py --nsub 4 --key-major --uniform --prefetch`
+on top of v2).
 A stock workgroup covers 2 query tiles of 16 tokens x the 3 query heads of one KV head (6 waves), so each 32-key K/V tile it
 dequantizes into LDS serves only 32 queries. Now a workgroup covers 4 tiles (12 waves, 384 lanes): half the staging per query.
 The staging lanes are also reordered key-major. In the stock order, the transposed V stores of one wave land on V^T rows 16 dims
-apart, which all hit the same LDS bank. Per query nothing changes (same key tiles, same order, same online-softmax steps), so the
-output is **bit-identical** (same tokens on the long, short and span equivalence sets). Compile report: 207 VGPRs (was 216), same
-occupancy, no spills.
+apart, which all hit the same LDS bank. The next K/V tile's global loads are issued right after the barrier that publishes the
+current one, so they run during its MMAs (`--prefetch`), and the wave-uniform tile-ownership values are broadcast into scalar
+registers (`--uniform`), which pays for the prefetch registers. Per query nothing changes (same key tiles, same order, same
+online-softmax steps, same dequantized values), so the output is **bit-identical** (same tokens on the long, short and span
+equivalence sets). Compile report: 207 VGPRs (was 216), same occupancy (7 waves/SIMD), no spills.
 
 Time to first token, single cold prompt (same session, drafter off):
 
-| prompt | v2 only | + 4-tile prefill |
-|--|--:|--:|
-| 8K | 2.05 s | 2.02 s |
-| 32K | 8.53 s | 8.30 s |
-| 64K | 20.0 s | 18.8 s |
-| 130K | 52.4 s | 46.2 s |
-| 255K | 149.7 s | **122.2 s** |
+| prompt | v2 only | 4 tiles + key-major | + prefetch + uniform (shipped) |
+|--|--:|--:|--:|
+| 8K | 2.05 s | 2.02 s | 2.03 s |
+| 32K | 8.53 s | 8.30 s | 8.25 s |
+| 64K | 20.0 s | 18.8 s | 18.6 s |
+| 130K | 52.4 s | 46.2 s | 45.3 s |
+| 255K | 149.7 s | 122.2 s | **118.5 s** |
 
-8 tiles per workgroup was slightly slower than 4 (255K: 130.6 s without key-major staging, against 129.7 s for 4).
+8 tiles per workgroup was slightly slower than 4 (255K: 130.6 s without key-major staging, against 129.7 s for 4). Prefetch alone
+needed 218 VGPRs (6 waves/SIMD) and gave 119.0 s; the broadcast brings it back to 7 waves.
 
 ### Running several chats: `INKLING_PROFILE=concurrent`
 ```bash

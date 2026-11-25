@@ -27237,10 +27237,16 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %r4_k7_i32 = scalar.constant 7 : i32
   %hi_half = index.cmp ne, %lane_half, %c0 : index
   %ms_true = scalar.constant true : i1
+  %ms_sub_i = index.cast %sub : index to i32
+  %ms_sub_b = kernel.subgroup.broadcast %ms_sub_i from %c0_i32 : i32, i32
+  %ms_subu = index.cast %ms_sub_b : i32 to index
   %live0c = scalar.constant true : i1
   %ms_lim1 = index.constant 3 : index
   %ms_room1 = index.cmp ult, %group_slot, %ms_lim1 : index
-  %ms_adj1 = func.call @g_tile_adjacent(%info, %tokens, %anchor, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_adjr1 = func.call @g_tile_adjacent(%info, %tokens, %anchor, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_adji1 = scf.select %ms_adjr1, %c1_i32m, %c0_i32 : i32
+  %ms_adjb1 = kernel.subgroup.broadcast %ms_adji1 from %c0_i32 : i32, i32
+  %ms_adj1 = scalar.cmpi ne, %ms_adjb1, %c0_i32 : i32
   %ms_a1 = scalar.andi %live0c, %ms_adj1 : i1
   %live1 = scalar.andi %ms_a1, %ms_room1 : i1
   %ms_off1 = index.constant 16 : index
@@ -27249,7 +27255,10 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %ms_f1 = index.assume %ms_fs1 [range(%ms_fs1, 0, 8191), lt(%ms_fs1, %tokens)] : index
   %ms_lim2 = index.constant 2 : index
   %ms_room2 = index.cmp ult, %group_slot, %ms_lim2 : index
-  %ms_adj2 = func.call @g_tile_adjacent(%info, %tokens, %ms_f1, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_adjr2 = func.call @g_tile_adjacent(%info, %tokens, %ms_f1, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_adji2 = scf.select %ms_adjr2, %c1_i32m, %c0_i32 : i32
+  %ms_adjb2 = kernel.subgroup.broadcast %ms_adji2 from %c0_i32 : i32, i32
+  %ms_adj2 = scalar.cmpi ne, %ms_adjb2, %c0_i32 : i32
   %ms_a2 = scalar.andi %live1, %ms_adj2 : i1
   %live2 = scalar.andi %ms_a2, %ms_room2 : i1
   %ms_off2 = index.constant 32 : index
@@ -27258,23 +27267,26 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %ms_f2 = index.assume %ms_fs2 [range(%ms_fs2, 0, 8191), lt(%ms_fs2, %tokens)] : index
   %ms_lim3 = index.constant 1 : index
   %ms_room3 = index.cmp ult, %group_slot, %ms_lim3 : index
-  %ms_adj3 = func.call @g_tile_adjacent(%info, %tokens, %ms_f2, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_adjr3 = func.call @g_tile_adjacent(%info, %tokens, %ms_f2, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_adji3 = scf.select %ms_adjr3, %c1_i32m, %c0_i32 : i32
+  %ms_adjb3 = kernel.subgroup.broadcast %ms_adji3 from %c0_i32 : i32, i32
+  %ms_adj3 = scalar.cmpi ne, %ms_adjb3, %c0_i32 : i32
   %ms_a3 = scalar.andi %live2, %ms_adj3 : i1
   %live3 = scalar.andi %ms_a3, %ms_room3 : i1
   %mine_s0 = scalar.constant true : i1
   %ms_c1 = index.constant 1 : index
-  %ms_is1 = index.cmp eq, %sub, %ms_c1 : index
+  %ms_is1 = index.cmp eq, %ms_subu, %ms_c1 : index
   %mine_s1 = scf.select %ms_is1, %live1, %mine_s0 : i1
   %ms_c2 = index.constant 2 : index
-  %ms_is2 = index.cmp eq, %sub, %ms_c2 : index
+  %ms_is2 = index.cmp eq, %ms_subu, %ms_c2 : index
   %mine_s2 = scf.select %ms_is2, %live2, %mine_s1 : i1
   %ms_c3 = index.constant 3 : index
-  %ms_is3 = index.cmp eq, %sub, %ms_c3 : index
+  %ms_is3 = index.cmp eq, %ms_subu, %ms_c3 : index
   %mine_s3 = scf.select %ms_is3, %live3, %mine_s2 : i1
   %mine = scalar.andi %mine_s3, %ms_true : i1
-  %ms_not0 = index.cmp ne, %sub, %c0 : index
+  %ms_not0 = index.cmp ne, %ms_subu, %c0 : index
   %use_sub = scalar.andi %ms_not0, %mine : i1
-  %ms_sub16 = index.mul %sub, %c16 : index
+  %ms_sub16 = index.mul %ms_subu, %c16 : index
   %ms_firstv = index.add %anchor, %ms_sub16 : index
   %first_sel = scf.select %use_sub, %ms_firstv, %anchor : index
   %first_token = index.assume %first_sel [range(%first_sel, 0, 8191), lt(%first_sel, %tokens)] : index
@@ -27419,47 +27431,45 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %st_seg_p1 = index.rem %st_slot_cl_p1, %ctpk : index
   %st_dim_val_p1 = index.mul %st_seg_p1, %cdpt : index
   %st_dim_p1 = index.assume %st_dim_val_p1 [range(%st_dim_val_p1, 0, 112)] : index
-  %m_final, %l_final, %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7 = scf.for %kt = [%c0 to %key_tiles step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
+  %pf_zq = vector.splati 0 : vector<16xi8>
+  %pf0_kp_raw = index.add %key_low, %st_key_p0 : index
+  %pf0_ok0 = index.cmp ule, %pf0_kp_raw, %pos_last : index
+  %pf0_ok1 = scalar.andi %pf0_ok0, %st_live_p0 : i1
+  %pf0_k, %pf0_v, %pf0_sk, %pf0_sv = scf.if %pf0_ok1 -> (vector<16xi8>, vector<16xi8>, f32, f32) {
+    %pf0_kp = index.assume %pf0_kp_raw [range(%pf0_kp_raw, 0, 1048575)] : index
+    %pf0_koff = func.call @g_kv_offset8(%origins, %row, %pf0_kp, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
+    %pf0_voff = index.add %pf0_koff, %plane_stride : offset
+    %pf0_c1024 = index.constant 1024 : offset
+    %pf0_kc = buffer.view %arena[%pf0_koff] : buffer -> view<8x128xi8>
+    %pf0_kso = index.add %pf0_koff, %pf0_c1024 : offset
+    %pf0_ks = buffer.view %arena[%pf0_kso] : buffer -> view<8x4xf16>
+    %pf0_vc = buffer.view %arena[%pf0_voff] : buffer -> view<8x128xi8>
+    %pf0_vso = index.add %pf0_voff, %pf0_c1024 : offset
+    %pf0_vs = buffer.view %arena[%pf0_vso] : buffer -> view<8x4xf16>
+    %pf0_c32 = index.constant 32 : index
+    %pf0_bv = index.div %st_dim_p0, %pf0_c32 : index
+    %pf0_bb = index.assume %pf0_bv [range(%pf0_bv, 0, 3)] : index
+    %pf0_kq = vector.load %pf0_kc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
+    %pf0_ks16 = view.load %pf0_ks[%kv, %pf0_bb] : view<8x4xf16> -> f16
+    %pf0_ksf = scalar.extf %pf0_ks16 : f16 to f32
+    %pf0_vq = vector.load %pf0_vc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
+    %pf0_vs16 = view.load %pf0_vs[%kv, %pf0_bb] : view<8x4xf16> -> f16
+    %pf0_vsf = scalar.extf %pf0_vs16 : f16 to f32
+    scf.yield %pf0_kq, %pf0_vq, %pf0_ksf, %pf0_vsf : vector<16xi8>, vector<16xi8>, f32, f32
+  } else {
+    scf.yield %pf_zq, %pf_zq, %zero_f, %zero_f : vector<16xi8>, vector<16xi8>, f32, f32
+  }
+  %m_final, %l_final, %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7, %pf_kf, %pf_vf, %pf_skf, %pf_svf = scf.for %kt = [%c0 to %key_tiles step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>, %pk = %pf0_k : vector<16xi8>, %pv = %pf0_v : vector<16xi8>, %psk = %pf0_sk : f32, %psv = %pf0_sv : f32) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xi8>, vector<16xi8>, f32, f32) {
     %tile_first = index.madd %kt, %ckt, %key_low : index
     scf.if %st_live_p0 {
-    %key_pos_p0 = index.add %tile_first, %st_key_p0 : index
-    %key_valid_p0 = index.cmp ule, %key_pos_p0, %pos_last : index
-    %kvals_p0, %vvals_p0 = scf.if %key_valid_p0 -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p0 = index.assume %key_pos_p0 [range(%key_pos_p0, 0, 1048575)] : index
-      %k_off_p0 = func.call @g_kv_offset8(%origins, %row, %kp_p0, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-      %v_off_p0 = index.add %k_off_p0, %plane_stride : offset
-      %k_cache_p0 = buffer.view %arena[%k_off_p0] : buffer -> view<8x128xi8>
-      %kv8_c_321 = index.constant 1024 : offset
-      %kv8_so_322 = index.add %k_off_p0, %kv8_c_321 : offset
-      %kv8_s_323 = buffer.view %arena[%kv8_so_322] : buffer -> view<8x4xf16>
-      %v_cache_p0 = buffer.view %arena[%v_off_p0] : buffer -> view<8x128xi8>
-      %kv8_c_324 = index.constant 1024 : offset
-      %kv8_so_325 = index.add %v_off_p0, %kv8_c_324 : offset
-      %kv8_s_326 = buffer.view %arena[%kv8_so_325] : buffer -> view<8x4xf16>
-      %kv8_q_327 = vector.load %k_cache_p0[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_328 = index.constant 32 : index
-      %kv8_bv_329 = index.div %st_dim_p0, %kv8_cd_328 : index
-      %kv8_bb_330 = index.assume %kv8_bv_329 [range(%kv8_bv_329, 0, 3)] : index
-      %kv8_s16_331 = view.load %kv8_s_323[%kv, %kv8_bb_330] : view<8x4xf16> -> f16
-      %kv8_s_332 = scalar.extf %kv8_s16_331 : f16 to f32
-      %kv8_f_333 = vector.sitofp %kv8_q_327 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_334 = vector.splat %kv8_s_332 : vector<16xf32>
-      %kv8_d_335 = vector.mulf %kv8_f_333, %kv8_sp_334 : vector<16xf32>
-      %kh_p0 = vector.fptrunc %kv8_d_335 : vector<16xf32> to vector<16xf16>
-      %kv8_q_336 = vector.load %v_cache_p0[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_337 = index.constant 32 : index
-      %kv8_bv_338 = index.div %st_dim_p0, %kv8_cd_337 : index
-      %kv8_bb_339 = index.assume %kv8_bv_338 [range(%kv8_bv_338, 0, 3)] : index
-      %kv8_s16_340 = view.load %kv8_s_326[%kv, %kv8_bb_339] : view<8x4xf16> -> f16
-      %kv8_s_341 = scalar.extf %kv8_s16_340 : f16 to f32
-      %kv8_f_342 = vector.sitofp %kv8_q_336 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_343 = vector.splat %kv8_s_341 : vector<16xf32>
-      %kv8_d_344 = vector.mulf %kv8_f_342, %kv8_sp_343 : vector<16xf32>
-      %vh_p0 = vector.fptrunc %kv8_d_344 : vector<16xf32> to vector<16xf16>
-      scf.yield %kh_p0, %vh_p0 : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
+    %pf_kfl = vector.sitofp %pk : vector<16xi8> to vector<16xf32>
+    %pf_ksp = vector.splat %psk : vector<16xf32>
+    %pf_kd = vector.mulf %pf_kfl, %pf_ksp : vector<16xf32>
+    %kvals_p0 = vector.fptrunc %pf_kd : vector<16xf32> to vector<16xf16>
+    %pf_vfl = vector.sitofp %pv : vector<16xi8> to vector<16xf32>
+    %pf_vsp = vector.splat %psv : vector<16xf32>
+    %pf_vd = vector.mulf %pf_vfl, %pf_vsp : vector<16xf32>
+    %vvals_p0 = vector.fptrunc %pf_vd : vector<16xf32> to vector<16xf16>
     vector.store %kvals_p0, %k_view[%st_key_p0, %st_dim_p0] : vector<16xf16>, view<32x136xf16>
     scf.for %j_p0 = [%c0 to %cdpt step %c1] unroll {
       %vj_p0 = vector.extract %vvals_p0[%j_p0] : vector<16xf16> -> f16
@@ -27516,6 +27526,37 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
       }
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+    %pf_ktn = index.add %kt, %c1 : index
+    %pf_has = index.cmp ult, %pf_ktn, %key_tiles : index
+    %pf_tfn = index.madd %pf_ktn, %ckt, %key_low : index
+    %pfn_kp_raw = index.add %pf_tfn, %st_key_p0 : index
+    %pfn_ok0 = index.cmp ule, %pfn_kp_raw, %pos_last : index
+    %pfn_ok1 = scalar.andi %pfn_ok0, %st_live_p0 : i1
+    %pfn_ok = scalar.andi %pfn_ok1, %pf_has : i1
+    %pfn_k, %pfn_v, %pfn_sk, %pfn_sv = scf.if %pfn_ok -> (vector<16xi8>, vector<16xi8>, f32, f32) {
+      %pfn_kp = index.assume %pfn_kp_raw [range(%pfn_kp_raw, 0, 1048575)] : index
+      %pfn_koff = func.call @g_kv_offset8(%origins, %row, %pfn_kp, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
+      %pfn_voff = index.add %pfn_koff, %plane_stride : offset
+      %pfn_c1024 = index.constant 1024 : offset
+      %pfn_kc = buffer.view %arena[%pfn_koff] : buffer -> view<8x128xi8>
+      %pfn_kso = index.add %pfn_koff, %pfn_c1024 : offset
+      %pfn_ks = buffer.view %arena[%pfn_kso] : buffer -> view<8x4xf16>
+      %pfn_vc = buffer.view %arena[%pfn_voff] : buffer -> view<8x128xi8>
+      %pfn_vso = index.add %pfn_voff, %pfn_c1024 : offset
+      %pfn_vs = buffer.view %arena[%pfn_vso] : buffer -> view<8x4xf16>
+      %pfn_c32 = index.constant 32 : index
+      %pfn_bv = index.div %st_dim_p0, %pfn_c32 : index
+      %pfn_bb = index.assume %pfn_bv [range(%pfn_bv, 0, 3)] : index
+      %pfn_kq = vector.load %pfn_kc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
+      %pfn_ks16 = view.load %pfn_ks[%kv, %pfn_bb] : view<8x4xf16> -> f16
+      %pfn_ksf = scalar.extf %pfn_ks16 : f16 to f32
+      %pfn_vq = vector.load %pfn_vc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
+      %pfn_vs16 = view.load %pfn_vs[%kv, %pfn_bb] : view<8x4xf16> -> f16
+      %pfn_vsf = scalar.extf %pfn_vs16 : f16 to f32
+      scf.yield %pfn_kq, %pfn_vq, %pfn_ksf, %pfn_vsf : vector<16xi8>, vector<16xi8>, f32, f32
+    } else {
+      scf.yield %pf_zq, %pf_zq, %zero_f, %zero_f : vector<16xi8>, vector<16xi8>, f32, f32
+    }
     %tf32 = index.cast %tile_first : index to i32
     %kl0_0 = vector.fragment.load<lhs> %k_view[%kb0_row, %d0] shape [%c16, %c16] : view<32x136xf16> -> vector<8xf16>
     %s0_0 = vector.mma %kl0_0, %qf0, %init : vector<8xf16>, vector<8xf16>, vector<8xf32>
@@ -28161,7 +28202,7 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
       scf.yield %pl0_1, %pl1_1, %pl2_1, %pl3_1, %pl4_1, %pl5_1, %pl6_1, %pl7_1 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-    scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7 : f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
+    scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7, %pfn_k, %pfn_v, %pfn_sk, %pfn_sv : f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xi8>, vector<16xi8>, f32, f32
   }
   %one_f = scalar.constant 1.0 : f32
   %inv_l = scalar.divf %one_f, %l_final : f32

@@ -13,7 +13,7 @@ Tile ownership generalises the stock pair rule: the workgroup of a listed tile w
 aligned group of NSUB tiles (position / 16 mod NSUB) or starts a run; it covers the following tiles while each one
 continues the previous (g_tile_adjacent) and stays inside the aligned group.
 
-usage: gen_flash2_multi.py IN.loom OUT.loom [--nsub 4|8] [--key-major]
+usage: gen_flash2_multi.py IN.loom OUT.loom [--nsub 4|8] [--key-major] [--uniform] [--prefetch]
 """
 import argparse, re, sys
 
@@ -122,15 +122,120 @@ def rewrite(k, nsub, key_major=False):
     return k
 
 
+def load_block(p, tile_first, extra=None):
+    """Global loads (raw int8 K/V chunk + f32 scales) of this lane's staging slot for the key tile starting at TILE_FIRST.
+    Invalid slots (past the last query position, or lanes >= 256) give zeros, which dequantize to +0.0 like the stock kz."""
+    L = [f"    %{p}_kp_raw = index.add {tile_first}, %st_key_p0 : index",
+         f"    %{p}_ok0 = index.cmp ule, %{p}_kp_raw, %pos_last : index",
+         f"    %{p}_ok1 = scalar.andi %{p}_ok0, %st_live_p0 : i1"]
+    ok = f"%{p}_ok1"
+    if extra:
+        L.append(f"    %{p}_ok = scalar.andi %{p}_ok1, {extra} : i1"); ok = f"%{p}_ok"
+    L += [f"    %{p}_k, %{p}_v, %{p}_sk, %{p}_sv = scf.if {ok} -> (vector<16xi8>, vector<16xi8>, f32, f32) {{",
+          f"      %{p}_kp = index.assume %{p}_kp_raw [range(%{p}_kp_raw, 0, 1048575)] : index",
+          f"      %{p}_koff = func.call @g_kv_offset8(%origins, %row, %{p}_kp, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)",
+          f"      %{p}_voff = index.add %{p}_koff, %plane_stride : offset",
+          f"      %{p}_c1024 = index.constant 1024 : offset",
+          f"      %{p}_kc = buffer.view %arena[%{p}_koff] : buffer -> view<8x128xi8>",
+          f"      %{p}_kso = index.add %{p}_koff, %{p}_c1024 : offset",
+          f"      %{p}_ks = buffer.view %arena[%{p}_kso] : buffer -> view<8x4xf16>",
+          f"      %{p}_vc = buffer.view %arena[%{p}_voff] : buffer -> view<8x128xi8>",
+          f"      %{p}_vso = index.add %{p}_voff, %{p}_c1024 : offset",
+          f"      %{p}_vs = buffer.view %arena[%{p}_vso] : buffer -> view<8x4xf16>",
+          f"      %{p}_c32 = index.constant 32 : index",
+          f"      %{p}_bv = index.div %st_dim_p0, %{p}_c32 : index",
+          f"      %{p}_bb = index.assume %{p}_bv [range(%{p}_bv, 0, 3)] : index",
+          f"      %{p}_kq = vector.load %{p}_kc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>",
+          f"      %{p}_ks16 = view.load %{p}_ks[%kv, %{p}_bb] : view<8x4xf16> -> f16",
+          f"      %{p}_ksf = scalar.extf %{p}_ks16 : f16 to f32",
+          f"      %{p}_vq = vector.load %{p}_vc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>",
+          f"      %{p}_vs16 = view.load %{p}_vs[%kv, %{p}_bb] : view<8x4xf16> -> f16",
+          f"      %{p}_vsf = scalar.extf %{p}_vs16 : f16 to f32",
+          f"      scf.yield %{p}_kq, %{p}_vq, %{p}_ksf, %{p}_vsf : vector<16xi8>, vector<16xi8>, f32, f32",
+          "    } else {",
+          "      scf.yield %pf_zq, %pf_zq, %zero_f, %zero_f : vector<16xi8>, vector<16xi8>, f32, f32",
+          "    }"]
+    return "\n".join(L) + "\n"
+
+
+def prefetch(k):
+    """Software-pipeline the K/V staging: tile kt+1's global loads are issued right after the barrier that publishes tile kt,
+    so they are in flight during tile kt's MMAs. Tile kt is dequantized and stored from registers at the top of iteration kt.
+    Same values reach LDS (same dequant arithmetic, zeros for invalid slots), so the output stays bit-identical."""
+    head_old = "  %m_final, %l_final, %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7 = scf.for %kt = [%c0 to %key_tiles step %c1]("
+    a = k.index(head_old); eol = k.index("\n", a); head = k[a:eol]
+    assert head.endswith(") {") and "%a7 = %init : vector<8xf32>)" in head, head[-120:]
+    head = head.replace("%o7 = scf.for", "%o7, %pf_kf, %pf_vf, %pf_skf, %pf_svf = scf.for", 1)
+    head = head.replace("%a7 = %init : vector<8xf32>)",
+                        "%a7 = %init : vector<8xf32>, %pk = %pf0_k : vector<16xi8>, %pv = %pf0_v : vector<16xi8>, %psk = %pf0_sk : f32, %psv = %pf0_sv : f32)", 1)
+    head = head[:-len(") {")] + ", vector<16xi8>, vector<16xi8>, f32, f32) {"
+    pro = "  %pf_zq = vector.splati 0 : vector<16xi8>\n" + load_block("pf0", "%key_low").replace("\n    ", "\n  ").replace("    %pf0_kp_raw", "  %pf0_kp_raw", 1)
+    k = k[:a] + pro + head + k[eol:]
+    # staging from the carried registers
+    s0 = k.index("    %key_pos_p0 = index.add %tile_first, %st_key_p0 : index\n")
+    e_mark = "    } else {\n      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>\n    }\n"
+    e0 = k.index(e_mark, s0) + len(e_mark)
+    k = k[:s0] + ("    %pf_kfl = vector.sitofp %pk : vector<16xi8> to vector<16xf32>\n"
+                  "    %pf_ksp = vector.splat %psk : vector<16xf32>\n"
+                  "    %pf_kd = vector.mulf %pf_kfl, %pf_ksp : vector<16xf32>\n"
+                  "    %kvals_p0 = vector.fptrunc %pf_kd : vector<16xf32> to vector<16xf16>\n"
+                  "    %pf_vfl = vector.sitofp %pv : vector<16xi8> to vector<16xf32>\n"
+                  "    %pf_vsp = vector.splat %psv : vector<16xf32>\n"
+                  "    %pf_vd = vector.mulf %pf_vfl, %pf_vsp : vector<16xf32>\n"
+                  "    %vvals_p0 = vector.fptrunc %pf_vd : vector<16xf32> to vector<16xf16>\n") + k[e0:]
+    # issue tile kt+1's loads after the publishing barrier
+    bar = "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n    %tf32 = index.cast %tile_first : index to i32\n"
+    k = sub1(k, bar, "    kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)\n"
+             "    %pf_ktn = index.add %kt, %c1 : index\n"
+             "    %pf_has = index.cmp ult, %pf_ktn, %key_tiles : index\n"
+             "    %pf_tfn = index.madd %pf_ktn, %ckt, %key_low : index\n"
+             + load_block("pfn", "%pf_tfn", "%pf_has") +
+             "    %tf32 = index.cast %tile_first : index to i32\n")
+    # carry them
+    y = k.index("    scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7 : f32, f32, ")
+    ye = k.index("\n", y); yl = k[y:ye]
+    yl = yl.replace("%on7 : f32, f32,", "%on7, %pfn_k, %pfn_v, %pfn_sk, %pfn_sv : f32, f32,", 1) + ", vector<16xi8>, vector<16xi8>, f32, f32"
+    return k[:y] + yl + k[ye:]
+
+
+def uniform_chain(k, nsub):
+    """The tile-ownership values (adjacency tests, this wave's sub-tile, first token, positions, key-tile count) are the
+    same in every lane of a wave, but the adjacency tests are per-lane loads, so everything derived from them, including the
+    loop bound, lives in VGPRs. Broadcasting the adjacency bits and the sub-tile index from lane 0 makes them scalar.
+    Same values: bit-identical."""
+    k = sub1(k, "  %ms_true = scalar.constant true : i1\n",
+             "  %ms_true = scalar.constant true : i1\n"
+             "  %ms_sub_i = index.cast %sub : index to i32\n"
+             "  %ms_sub_b = kernel.subgroup.broadcast %ms_sub_i from %c0_i32 : i32, i32\n"
+             "  %ms_subu = index.cast %ms_sub_b : i32 to index\n")
+    for j in range(1, nsub):
+        call = f"  %ms_adj{j} = func.call @g_tile_adjacent("
+        a = k.index(call); e = k.index("\n", a) + 1
+        line = k[a:e].replace(f"%ms_adj{j} = ", f"%ms_adjr{j} = ", 1)
+        k = k[:a] + line + (f"  %ms_adji{j} = scf.select %ms_adjr{j}, %c1_i32m, %c0_i32 : i32\n"
+                            f"  %ms_adjb{j} = kernel.subgroup.broadcast %ms_adji{j} from %c0_i32 : i32, i32\n"
+                            f"  %ms_adj{j} = scalar.cmpi ne, %ms_adjb{j}, %c0_i32 : i32\n") + k[e:]
+        k = sub1(k, f"  %ms_is{j} = index.cmp eq, %sub, %ms_c{j} : index\n", f"  %ms_is{j} = index.cmp eq, %ms_subu, %ms_c{j} : index\n")
+    k = sub1(k, "  %ms_not0 = index.cmp ne, %sub, %c0 : index\n", "  %ms_not0 = index.cmp ne, %ms_subu, %c0 : index\n")
+    k = sub1(k, "  %ms_sub16 = index.mul %sub, %c16 : index\n", "  %ms_sub16 = index.mul %ms_subu, %c16 : index\n")
+    return k
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("inp"); ap.add_argument("out")
     ap.add_argument("--nsub", type=int, default=4, choices=(4, 8))
     ap.add_argument("--key-major", action="store_true", help="key-major K/V staging lanes (fewer LDS bank conflicts)")
+    ap.add_argument("--prefetch", action="store_true", help="load the next K/V tile while the current one is computed")
+    ap.add_argument("--uniform", action="store_true", help="broadcast the wave-uniform tile-ownership values (scalar registers)")
     a = ap.parse_args()
     src = open(a.inp).read()
     s, e = kernel_span(src)
     new = rewrite(src[s:e], a.nsub, a.key_major)
+    if a.uniform:
+        new = uniform_chain(new, a.nsub)
+    if a.prefetch:
+        new = prefetch(new)
     open(a.out, "w").write(src[:s] + new + src[e:])
     print(f"rewrote {NAME}: {a.nsub} query tiles per workgroup ({96 * a.nsub} lanes)", file=sys.stderr)
 
