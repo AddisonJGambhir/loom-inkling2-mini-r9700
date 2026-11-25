@@ -46,12 +46,13 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 | A4 | go to Verify | | |
 
 ## Path B (stock upstream checkout, PR not merged)
-Fetch three files from the fork branch: `tools/gen_attn_split_v2.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
+Fetch four files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
 | # | run | expect | on fail |
 |--|--|--|--|
 | B1 | `sha256sum package/program/llm.loom` | starts `4429a038eb9a30fb` (upstream 72294fb) or another stock hash | continue; B2 decides |
 | B2 | `python3 -I tools/gen_attn_split_v2.py package/program/llm.loom /tmp/llm.v2.loom --span` | stderr: `added g_ink_attn_split_span_v2 and patched 16 span call sites` | `ValueError`/`AssertionError`: the stock kernel changed upstream; stop and report (do not hand-edit) |
-| B3 | `sha256sum /tmp/llm.v2.loom` | starts `9fcfa2f4f2c6b3d3` when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
+| B2b | `python3 -I tools/gen_flash2_multi.py /tmp/llm.v2.loom /tmp/llm.v2.loom --nsub 4 --key-major` (prefill kernel, recommended) | stderr: `rewrote g_ink_attention_flash2_ts2_rdna4: 4 query tiles per workgroup (384 lanes)` | `ValueError`: the stock prefill kernel changed; skip B2b and report |
+| B3 | `sha256sum /tmp/llm.v2.loom` | starts `241bef90af85774f` (or `9fcfa2f4f2c6b3d3` without B2b) when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
 | B4 | `cp package/program/llm.loom /tmp/llm.stock.loom && cp /tmp/llm.v2.loom package/program/llm.loom && cp package/program/llm.loom "$HOME_DIR/model/program/llm.loom"` | files copied | — |
 | B5 | `cp bin/proxy.py /tmp/proxy.stock.py`, then put the fork's `bin/proxy.py` in place | — | — |
 | B6 | (C, optional) apply the card settings below to `"$HOME_DIR/model/model.json"` (or a copy passed to `--model`) and the proxy env vars to the proxy process | — | — |
@@ -71,7 +72,7 @@ Budget rule: `17.2 GiB + 3.6 GiB + budget x 17.4 KB <= pool - 1.5 GB` (drafter o
 ## Verify (all must PASS)
 | # | run | expect (reference: R9700, 210 W cap, 0.2.0; 0.3.0 within ~3%) |
 |--|--|--|
-| T1 | `python3 -I tools/verify_r9700.py --proxy $PROXY --backend $BACKEND kernel` (add `--stock /tmp/llm.stock.loom` on Path B) | `PASS`; `regenerated_identically: true` with `--stock` |
+| T1 | `python3 -I tools/verify_r9700.py --proxy $PROXY --backend $BACKEND kernel` (add `--stock /tmp/llm.stock.loom` on Path B) | `PASS`; `prefill_4tile: true` (unless B2b was skipped); `regenerated_identically: true` with `--stock` |
 | T2 | `... decode` (~2 min, loads the GPU) | `PASS`, ratio >= 0.75 (reference 0.873; stock ~0.68) |
 | T3 | `... reuse` | `PASS`, pct >= 90 (reference 99.9, ttft ~0.1-0.2 s). The stock proxy fails this |
 | T4 | `... concurrency` (only with C) | `PASS`, `budget_guard: 570000` |

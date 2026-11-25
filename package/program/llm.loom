@@ -27121,7 +27121,7 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %c1 = index.constant 1 : index
   %ckv = index.constant 8 : index
   %c16 = index.constant 16 : index
-  %clanes = index.constant 192 : index
+  %clanes = index.constant 384 : index
   %tiles_count = index.div %tokens, %c16 : index
   kernel.launch.config workgroups(%tiles_count, %ckv, %c1) workgroup_size(%clanes, %c1, %c1) : index
 } launch(%tokens_arg: index, %layer_arg: index, %sliding: i32, %context_arg: index, %pool_arg: index, %q: buffer, %r: buffer, %rel_bias: buffer, %sinks: buffer, %gate: buffer, %info: buffer, %tiles: buffer, %origins: buffer, %arena: buffer, %out: buffer) {
@@ -27205,7 +27205,8 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %posa_bound = scalar.assume %pos0_32 [range(%pos0_32, 0, 1048560)] : i32
   %pos_a = index.cast %posa_bound : i32 to index
   %pos_tile = index.div %pos_a, %c16 : index
-  %group_slot = index.rem %pos_tile, %c2 : index
+  %ms_nsub = index.constant 4 : index
+  %group_slot = index.rem %pos_tile, %ms_nsub : index
   %first_slot = index.cmp eq, %group_slot, %c0 : index
   %continued = func.call @g_tile_adjacent(%info, %tokens, %anchor, %true_top) : (buffer, index, index, i1) -> (i1)
   %starts = scalar.xori %continued, %true_top : i1
@@ -27213,9 +27214,9 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %live0 = scalar.andi %listed, %owner : i1
   scf.if %live0 {
   %workitem_id = kernel.workitem.id<x> : index
-  %workitem = index.assume %workitem_id [range(%workitem_id, 0, 191)] : index
+  %workitem = index.assume %workitem_id [range(%workitem_id, 0, 383)] : index
   %wave_id = kernel.subgroup.id : index
-  %wave_all = index.assume %wave_id [range(%wave_id, 0, 5)] : index
+  %wave_all = index.assume %wave_id [range(%wave_id, 0, 11)] : index
   %cG_w = index.constant 3 : index
   %sub = index.div %wave_all, %cG_w : index
   %wave = index.rem %wave_all, %cG_w : index
@@ -27235,20 +27236,60 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %r4_k6_i32 = scalar.constant 6 : i32
   %r4_k7_i32 = scalar.constant 7 : i32
   %hi_half = index.cmp ne, %lane_half, %c0 : index
-  %adj1 = func.call @g_tile_adjacent(%info, %tokens, %anchor, %false_top) : (buffer, index, index, i1) -> (i1)
-  %live1 = scalar.andi %first_slot, %adj1 : i1
-  %is_sub1 = index.cmp eq, %sub, %c1 : index
-  %use_sub1 = scalar.andi %is_sub1, %live1 : i1
-  %mine = scf.select %is_sub1, %live1, %true_top : i1
-  %first1_v = index.add %anchor, %c16 : index
-  %first_sel = scf.select %use_sub1, %first1_v, %anchor : index
+  %ms_true = scalar.constant true : i1
+  %live0c = scalar.constant true : i1
+  %ms_lim1 = index.constant 3 : index
+  %ms_room1 = index.cmp ult, %group_slot, %ms_lim1 : index
+  %ms_adj1 = func.call @g_tile_adjacent(%info, %tokens, %anchor, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_a1 = scalar.andi %live0c, %ms_adj1 : i1
+  %live1 = scalar.andi %ms_a1, %ms_room1 : i1
+  %ms_off1 = index.constant 16 : index
+  %ms_fv1 = index.add %anchor, %ms_off1 : index
+  %ms_fs1 = scf.select %live1, %ms_fv1, %anchor : index
+  %ms_f1 = index.assume %ms_fs1 [range(%ms_fs1, 0, 8191), lt(%ms_fs1, %tokens)] : index
+  %ms_lim2 = index.constant 2 : index
+  %ms_room2 = index.cmp ult, %group_slot, %ms_lim2 : index
+  %ms_adj2 = func.call @g_tile_adjacent(%info, %tokens, %ms_f1, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_a2 = scalar.andi %live1, %ms_adj2 : i1
+  %live2 = scalar.andi %ms_a2, %ms_room2 : i1
+  %ms_off2 = index.constant 32 : index
+  %ms_fv2 = index.add %anchor, %ms_off2 : index
+  %ms_fs2 = scf.select %live2, %ms_fv2, %anchor : index
+  %ms_f2 = index.assume %ms_fs2 [range(%ms_fs2, 0, 8191), lt(%ms_fs2, %tokens)] : index
+  %ms_lim3 = index.constant 1 : index
+  %ms_room3 = index.cmp ult, %group_slot, %ms_lim3 : index
+  %ms_adj3 = func.call @g_tile_adjacent(%info, %tokens, %ms_f2, %false_top) : (buffer, index, index, i1) -> (i1)
+  %ms_a3 = scalar.andi %live2, %ms_adj3 : i1
+  %live3 = scalar.andi %ms_a3, %ms_room3 : i1
+  %mine_s0 = scalar.constant true : i1
+  %ms_c1 = index.constant 1 : index
+  %ms_is1 = index.cmp eq, %sub, %ms_c1 : index
+  %mine_s1 = scf.select %ms_is1, %live1, %mine_s0 : i1
+  %ms_c2 = index.constant 2 : index
+  %ms_is2 = index.cmp eq, %sub, %ms_c2 : index
+  %mine_s2 = scf.select %ms_is2, %live2, %mine_s1 : i1
+  %ms_c3 = index.constant 3 : index
+  %ms_is3 = index.cmp eq, %sub, %ms_c3 : index
+  %mine_s3 = scf.select %ms_is3, %live3, %mine_s2 : i1
+  %mine = scalar.andi %mine_s3, %ms_true : i1
+  %ms_not0 = index.cmp ne, %sub, %c0 : index
+  %use_sub = scalar.andi %ms_not0, %mine : i1
+  %ms_sub16 = index.mul %sub, %c16 : index
+  %ms_firstv = index.add %anchor, %ms_sub16 : index
+  %first_sel = scf.select %use_sub, %ms_firstv, %anchor : index
   %first_token = index.assume %first_sel [range(%first_sel, 0, 8191), lt(%first_sel, %tokens)] : index
-  %pos1 = index.add %pos_a, %c16 : index
-  %pos0 = scf.select %use_sub1, %pos1, %pos_a : index
-  %c31_pos = index.constant 31 : index
-  %pos_last0 = index.add %pos_a, %c15 : index
-  %pos_last1 = index.add %pos_a, %c31_pos : index
-  %pos_last = scf.select %live1, %pos_last1, %pos_last0 : index
+  %ms_possub = index.add %pos_a, %ms_sub16 : index
+  %pos0 = scf.select %use_sub, %ms_possub, %pos_a : index
+  %pos_last_0 = index.add %pos_a, %c15 : index
+  %ms_pl1 = index.constant 31 : index
+  %ms_plv1 = index.add %pos_a, %ms_pl1 : index
+  %pos_last_1 = scf.select %live1, %ms_plv1, %pos_last_0 : index
+  %ms_pl2 = index.constant 47 : index
+  %ms_plv2 = index.add %pos_a, %ms_pl2 : index
+  %pos_last_2 = scf.select %live2, %ms_plv2, %pos_last_1 : index
+  %ms_pl3 = index.constant 63 : index
+  %ms_plv3 = index.add %pos_a, %ms_pl3 : index
+  %pos_last = scf.select %live3, %ms_plv3, %pos_last_2 : index
   %padded = index.add %context, %c15 : index
   %blocks = index.div %padded, %c16 : index
   %k_plane = index.mul %layer, %c2 : index
@@ -27361,14 +27402,17 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %kz = vector.splatf 0.0 : vector<16xf16>
   %st_add_p0 = index.constant 0 : index
   %st_slot_p0 = index.add %workitem, %st_add_p0 : index
-  %st_key_val_p0 = index.div %st_slot_p0, %ctpk : index
+  %st_live_p0 = index.cmp ult, %st_slot_p0, %c_slots : index
+  %st_slot_cl_p0 = index.min %st_slot_p0, %c_slots_less : index
+  %st_keys32 = index.constant 32 : index
+  %st_key_val_p0 = index.rem %st_slot_cl_p0, %st_keys32 : index
   %st_key_p0 = index.assume %st_key_val_p0 [range(%st_key_val_p0, 0, 31)] : index
-  %st_seg_p0 = index.rem %st_slot_p0, %ctpk : index
+  %st_seg_p0 = index.div %st_slot_cl_p0, %st_keys32 : index
   %st_dim_val_p0 = index.mul %st_seg_p0, %cdpt : index
   %st_dim_p0 = index.assume %st_dim_val_p0 [range(%st_dim_val_p0, 0, 112)] : index
   %st_add_p1 = index.constant 192 : index
   %st_slot_p1 = index.add %workitem, %st_add_p1 : index
-  %st_live_p1 = index.cmp ult, %st_slot_p1, %c_slots : index
+  %st_live_p1 = scalar.constant false : i1
   %st_slot_cl_p1 = index.min %st_slot_p1, %c_slots_less : index
   %st_key_val_p1 = index.div %st_slot_cl_p1, %ctpk : index
   %st_key_p1 = index.assume %st_key_val_p1 [range(%st_key_val_p1, 0, 31)] : index
@@ -27377,6 +27421,7 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %st_dim_p1 = index.assume %st_dim_val_p1 [range(%st_dim_val_p1, 0, 112)] : index
   %m_final, %l_final, %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7 = scf.for %kt = [%c0 to %key_tiles step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
     %tile_first = index.madd %kt, %ckt, %key_low : index
+    scf.if %st_live_p0 {
     %key_pos_p0 = index.add %tile_first, %st_key_p0 : index
     %key_valid_p0 = index.cmp ule, %key_pos_p0, %pos_last : index
     %kvals_p0, %vvals_p0 = scf.if %key_valid_p0 -> (vector<16xf16>, vector<16xf16>) {
@@ -27421,6 +27466,7 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
       %vt_row_val_p0 = index.add %st_dim_p0, %j_p0 : index
       %vt_row_p0 = index.assume %vt_row_val_p0 [range(%vt_row_val_p0, 0, 127)] : index
       view.store %vj_p0, %vt_view[%vt_row_p0, %st_key_p0] : f16, view<128x40xf16>
+    }
     }
     scf.if %st_live_p1 {
       %key_pos_p1 = index.add %tile_first, %st_key_p1 : index

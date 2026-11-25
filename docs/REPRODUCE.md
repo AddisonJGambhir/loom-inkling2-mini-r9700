@@ -14,13 +14,15 @@ Measured on one Radeon AI PRO R9700 (gfx1201, 32 GB, 210 W power cap, also drivi
 | Agent follow-up turn at ~110K context (tool-using agent) | 0% of the prompt reused, 38-58 s to first token | **99%+ reused, ~2 s** |
 | Turn after a screenshot (vision tool result) | full re-read (30-100 s at 80K) | **99.9% reused, ~0.2 s** (optional vision offload) |
 | Concurrent chats | 1 chat (448K) | **up to 4 chats x 262K**, with a memory guard |
+| Cold prompt, time to first token at 130K / 255K | 52 / 150 s | **46 / 122 s** (bit-identical output) |
 
-Short-context decode, prefill speed and 4-chat throughput are unchanged (within ~1%).
+Short-context decode, short-prompt prefill and 4-chat throughput are unchanged (within ~1%).
 
 The changes come in three independent parts. You can take any of them:
 
 1. **Decode attention v2** (one kernel in `package/program/llm.loom`). Long-context decode reads the int8 KV cache at ~413 GB/s
    instead of ~128 GB/s. It is not bit-exact (float summation order); see the README for the equivalence tests.
+   **Prefill attention, 4 tiles per workgroup** (same file): long prompts prefill up to ~22% faster, bit-identical to v2.
 2. **Proxy fixes** (`bin/proxy.py`). Loom 0.2.0 only reuses a conversation's cached state if the request looks text-only and the
    history is sent back exactly. Two common agent behaviours break that, and the proxy fixes both:
    - a tool with a parameter literally named `image_url` (for example a `vision_analyze` tool) makes Loom treat every request as an
@@ -61,18 +63,19 @@ directory). You can also copy them yourself into `~/.local/share/inkling-r9700/m
 
 ## Path B: stock upstream, PR not merged
 
-You need three files from the fork branch:
-`tools/gen_attn_split_v2.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
+You need four files from the fork branch:
+`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
 
 **1. Kernel.** Generate it from your own `llm.loom` rather than copying ours, so it matches your package version:
 
 ```bash
 python3 -I gen_attn_split_v2.py package/program/llm.loom /tmp/llm.v2.loom --span
+python3 -I gen_flash2_multi.py /tmp/llm.v2.loom /tmp/llm.v2.loom --nsub 4 --key-major     # optional: faster long prefill
 sha256sum package/program/llm.loom /tmp/llm.v2.loom
 ```
 
-From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), the result starts with `9fcfa2f4f2c6b3d3`, the exact
-file in the PR. If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
+From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), the result starts with `241bef90af85774f`, the exact
+file in the PR (`9fcfa2f4f2c6b3d3` if you skip the second step). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
 with an error otherwise. Install it with `cp /tmp/llm.v2.loom ~/.local/share/inkling-r9700/model/program/llm.loom`, then
 `bin/inkling-r9700 restart`. The first start compiles the changed kernels (seconds to a minute).
 

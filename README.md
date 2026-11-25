@@ -100,6 +100,27 @@ With the drafter on (the default profile), decode verifies 4-token spans, which 
 the drafter on: 76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K. That is slower than drafter-off v2 beyond ~8K, so the
 concurrent profile turns the drafter off. (A lane-grouped multi-token span kernel was tried and gave no measurable gain.)
 
+### Prefill attention: 4 tiles per workgroup
+`g_ink_attention_flash2_ts2_rdna4` (gfx12 prefill attention, made by `tools/gen_flash2_multi.py --nsub 4 --key-major` on top of v2).
+A stock workgroup covers 2 query tiles of 16 tokens x the 3 query heads of one KV head (6 waves), so each 32-key K/V tile it
+dequantizes into LDS serves only 32 queries. Now a workgroup covers 4 tiles (12 waves, 384 lanes): half the staging per query.
+The staging lanes are also reordered key-major. In the stock order, the transposed V stores of one wave land on V^T rows 16 dims
+apart, which all hit the same LDS bank. Per query nothing changes (same key tiles, same order, same online-softmax steps), so the
+output is **bit-identical** (same tokens on the long, short and span equivalence sets). Compile report: 207 VGPRs (was 216), same
+occupancy, no spills.
+
+Time to first token, single cold prompt (same session, drafter off):
+
+| prompt | v2 only | + 4-tile prefill |
+|--|--:|--:|
+| 8K | 2.05 s | 2.02 s |
+| 32K | 8.53 s | 8.30 s |
+| 64K | 20.0 s | 18.8 s |
+| 130K | 52.4 s | 46.2 s |
+| 255K | 149.7 s | **122.2 s** |
+
+8 tiles per workgroup was slightly slower than 4 (255K: 130.6 s without key-major staging, against 129.7 s for 4).
+
 ### Running several chats: `INKLING_PROFILE=concurrent`
 ```bash
 INKLING_PROFILE=concurrent bin/inkling-r9700 start

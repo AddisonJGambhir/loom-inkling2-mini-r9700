@@ -2,7 +2,8 @@
 """Verify the R9700 changes on a running install (standard library only).
 
 Checks (run any subset; default: kernel decode reuse):
-  kernel       llm.loom contains decode attention v2 (and, if --stock is given, was generated from it)
+  kernel       llm.loom contains decode attention v2, and whether prefill attention uses 4 tiles per workgroup
+               (if --stock is given: that it was generated from the stock file by the tools here)
   decode       long-context decode keeps up: tok/s with ~47K tokens of context divided by tok/s at ~6K.
                On an R9700: v2 ~0.87, stock ~0.68 (from measured 8K/30K/60K stock rates). PASS if >= 0.75.
   reuse        agent-style follow-up turns reuse the cached prompt through the proxy, with a tool that has an
@@ -108,14 +109,19 @@ def check_kernel():
     has_v2 = 'kernel.def export("g_ink_attn_split_span_v2")' in t
     s = t.index('kernel.def export("g_ink_attn_split")'); head = t[s:s + 400]
     one_wave = "%lanes = index.constant 32 : index" in head
+    f = t.find('export("g_ink_attention_flash2_ts2_rdna4")')
+    prefill_4tile = f >= 0 and "%clanes = index.constant 384 : index" in t[f:f + 400]
     regen = None
     if STOCK:
-        gen = os.path.join(os.path.dirname(os.path.abspath(__file__)), "gen_attn_split_v2.py")
+        here = os.path.dirname(os.path.abspath(__file__))
         out = LLM + ".verify-regen"
-        subprocess.run([sys.executable, "-I", gen, STOCK, out, "--span"], check=True, capture_output=True)
+        subprocess.run([sys.executable, "-I", os.path.join(here, "gen_attn_split_v2.py"), STOCK, out, "--span"], check=True, capture_output=True)
+        if prefill_4tile:
+            subprocess.run([sys.executable, "-I", os.path.join(here, "gen_flash2_multi.py"), out, out, "--nsub", "4", "--key-major"],
+                           check=True, capture_output=True)
         regen = open(out).read() == t; os.remove(out)
     return report("kernel", has_v2 and one_wave and regen is not False, llm_sha256_16=sha, span_v2=has_v2, single_token_v2=one_wave,
-                  regenerated_identically=regen)
+                  prefill_4tile=prefill_4tile, regenerated_identically=regen)
 
 
 def decode_tps(n_tokens, seed):
