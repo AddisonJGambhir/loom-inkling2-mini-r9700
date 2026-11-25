@@ -170,10 +170,92 @@ class TokenBudget:
                     "max_active": self.max_active, "queued": len(self.queue), "queue_timeout_s": self.timeout}
 
 
+class DecodePriority:
+    """Opt-in decode priority (LOOM_DECODE_PRIORITY=1, 2026-11-25; needs LOOM_TOKEN_BUDGET).
+
+    Loom runs one scheduling step at a time: a prefill_capacity chunk (2048 tokens) of any prompt being read, plus one
+    token per chat that is replying. While a long cold prompt is read, every replying chat drops to ~2 tok/s (measured:
+    91 -> 2.1 tok/s during a 25K prefill). No card setting gives a replying chat more than one token per step.
+    This holds a request whose prompt needs a large fresh read (>= LOOM_DECODE_PRIORITY_MIN uncached tokens) while any
+    other chat is mid-reply, for at most LOOM_DECODE_PRIORITY_WAIT seconds, so the reply finishes at full speed first.
+    The held chat waits longer for its first token. Agent turns that continue a cached conversation read only the new
+    messages, so they are rarely held. The fresh read is estimated per conversation: if a request extends the previous
+    request of the same conversation message for message, fresh = prompt - (previous prompt + reply); otherwise, or if
+    EchoCheck finds the history no longer matches what was generated, or the previous reply hit max_tokens, the whole
+    prompt. Holding happens before the budget queue, so small requests are not stuck behind a held one."""
+
+    def __init__(self, min_tokens, max_wait, keep=64):
+        from collections import OrderedDict
+        self.min, self.wait, self.keep = min_tokens, max_wait, keep
+        self.cv = threading.Condition(); self.live = {}; self.seq = 0; self.held = 0; self.convs = OrderedDict()
+
+    @staticmethod
+    def _fps(msgs):
+        import hashlib
+        return [hashlib.sha1(json.dumps(m, sort_keys=True).encode()).hexdigest()[:12] for m in msgs or []]
+
+    def fresh(self, msgs, prompt):
+        fp = self._fps(msgs)
+        if len(fp) < 2:
+            return prompt
+        with self.cv:
+            prev = self.convs.get(fp[0] + fp[1])
+        if prev and len(prev[0]) <= len(fp) and fp[:len(prev[0])] == prev[0]:
+            return max(0, prompt - prev[1])
+        return prompt
+
+    def record(self, msgs, prompt, completion, finish=None):
+        fp = self._fps(msgs)
+        if len(fp) < 2 or not prompt:
+            return
+        with self.cv:   # a reply cut by max_tokens makes Loom re-read the next turn in full: count nothing as cached
+            key = fp[0] + fp[1]; self.convs.pop(key, None); self.convs[key] = (fp, 0 if finish == "length" else prompt + completion)
+            while len(self.convs) > self.keep:
+                self.convs.popitem(last=False)
+
+    def _decoding(self, now):
+        return sum(1 for s in self.live.values() if s["first"] or (not s["stream"] and now - s["t0"] > s["pre"]))
+
+    def hold(self, fresh, label):
+        if fresh < self.min:
+            return
+        with self.cv:
+            t0 = time.time()
+            if not self._decoding(t0):
+                return
+            self.held += 1
+            log(f"  decode-priority: holding {label} ({fresh:,} fresh tokens) while {self._decoding(t0)} chat(s) reply")
+            while self._decoding(time.time()) and time.time() - t0 < self.wait:
+                self.cv.wait(min(1.0, self.wait))
+            self.held -= 1
+            log(f"  decode-priority: released {label} after {time.time() - t0:.1f}s"
+                + (" (max wait)" if self._decoding(time.time()) else ""))
+
+    def start(self, stream, fresh):
+        with self.cv:
+            self.seq += 1; self.live[self.seq] = {"stream": stream, "first": False, "t0": time.time(), "pre": fresh / 3500 + 0.5}
+            return self.seq
+
+    def first(self, t):
+        with self.cv:
+            if t in self.live:
+                self.live[t]["first"] = True
+
+    def end(self, t):
+        with self.cv:
+            self.live.pop(t, None); self.cv.notify_all()
+
+    def status(self):
+        with self.cv:
+            return {"min_fresh_tokens": self.min, "max_wait_s": self.wait, "held": self.held, "replying": self._decoding(time.time())}
+
+
 BUDGET = TokenBudget(int(os.environ.get("LOOM_TOKEN_BUDGET", "0") or 0),
                      int(os.environ.get("LOOM_MAX_SESSIONS", "0") or 0) or 1 << 30,
                      float(os.environ.get("LOOM_QUEUE_TIMEOUT", "1800")))
 CARD_MAX_TOKENS = int(os.environ.get("LOOM_MAX_TOKENS", "48000"))
+DPRI = (DecodePriority(int(os.environ.get("LOOM_DECODE_PRIORITY_MIN", "8192")), float(os.environ.get("LOOM_DECODE_PRIORITY_WAIT", "30")))
+        if os.environ.get("LOOM_DECODE_PRIORITY", "0") == "1" and BUDGET.budget else None)
 
 
 class PrefixDiff:
@@ -259,10 +341,11 @@ class EchoCheck:
                    "chat_template_kwargs", "thinking", "reasoning")
 
     def check(self, msgs, req=None):
+        """Logs why reuse will break; returns True if it will (used by DecodePriority's fresh-token estimate)."""
         k = self.key(msgs)
         if not k:
-            return
-        notes = []
+            return False
+        notes = []; broken = False
         if isinstance(req, dict):
             params = {rk: self._h(req.get(rk)) for rk in self.RENDER_KEYS if req.get(rk) is not None}
             with self.lock:
@@ -271,7 +354,7 @@ class EchoCheck:
                     self.params.popitem(last=False)
             if prev_p is not None and prev_p != params:
                 ch = sorted(rk for rk in set(prev_p) | set(params) if prev_p.get(rk) != params.get(rk))
-                notes.append(f"request settings changed since the last turn: {ch} (rendered into the prompt; breaks reuse)")
+                notes.append(f"request settings changed since the last turn: {ch} (rendered into the prompt; breaks reuse)"); broken = True
         extra = sorted({kk for m in msgs if isinstance(m, dict) and m.get("role") == "assistant" for kk in m}
                        - {"role", "content", "reasoning_content", "reasoning", "tool_calls"})
         if extra:
@@ -281,7 +364,7 @@ class EchoCheck:
                 notes.append(f"assistant turns carry extra fields {extra}")
         images = _image_parts(msgs)
         if images:
-            notes.append(f"{images} image part(s) in this request (Loom re-reads image turns in full)")
+            notes.append(f"{images} image part(s) in this request (Loom re-reads image turns in full)"); broken = True
         k1 = self._h(msgs[1]); sh = self._h(msgs[0])
         with self.lock:
             prev_sys = self.sys.get(k1)
@@ -291,7 +374,7 @@ class EchoCheck:
             g = self.gen.get(k)
         continuing = any(isinstance(m, dict) and m.get("role") == "assistant" for m in msgs)
         if prev_sys and prev_sys[0] != sh and continuing:
-            notes.append(f"system prompt changed since the last turn (len {prev_sys[1]} -> {len(json.dumps(msgs[0]))}); nothing can be reused")
+            notes.append(f"system prompt changed since the last turn (len {prev_sys[1]} -> {len(json.dumps(msgs[0]))}); nothing can be reused"); broken = True
         if g:
             n_prev, gm = g
             if len(msgs) > n_prev and isinstance(msgs[n_prev], dict) and msgs[n_prev].get("role") == "assistant":
@@ -317,11 +400,12 @@ class EchoCheck:
                     diffs.append("tool-call arguments re-serialized (" + ", ".join(
                         f"{len(a or '')}->{len(b or '')}" for (_, a), (_, b) in zip(gt, et)) + ")")
                 if diffs:
-                    notes.append(f"assistant turn {n_prev} differs from what was generated: " + "; ".join(diffs))
+                    notes.append(f"assistant turn {n_prev} differs from what was generated: " + "; ".join(diffs)); broken = True
             elif len(msgs) <= n_prev:
-                notes.append(f"history shorter than last request ({n_prev} -> {len(msgs)} messages): compacted or truncated")
+                notes.append(f"history shorter than last request ({n_prev} -> {len(msgs)} messages): compacted or truncated"); broken = True
         for n in notes:
             log(f"  echo conv {k[:8]}: {n}")
+        return broken
 
     def record(self, msgs, gm):
         k = self.key(msgs)
@@ -887,7 +971,7 @@ class Proxy(BaseHTTPRequestHandler):
     def _relay(self, method):
         t0 = time.time()
         self._ck = None; self._plain_body = None; self._plain_msgs = None; self._echo_msgs = None; self._aliased = None
-        gen = {"content": "", "reasoning": "", "tc": {}}
+        gen = {"content": "", "reasoning": "", "tc": {}, "finish": None}
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else None
         model_in = None
@@ -959,14 +1043,23 @@ class Proxy(BaseHTTPRequestHandler):
                         PREFIX_DIFF.check(self._echo_msgs)
                     except Exception as e:
                         log(f"  prefix-diff error: {e!r}")
+                broken = False
                 if ECHO:
                     try:
-                        ECHO.check(self._echo_msgs, jb)
+                        broken = ECHO.check(self._echo_msgs, jb)
                     except Exception as e:
                         log(f"  echo error: {e!r}")
                 cost, ptok = _estimate_cost(jb)
                 label = f"prompt {ptok:,}" + (" (est, images)" if _image_parts(jb.get("messages")) else "")
+                fresh = ptok
+                if DPRI:
+                    try:
+                        fresh = ptok if broken else DPRI.fresh(self._echo_msgs, ptok); DPRI.hold(fresh, label)
+                    except Exception as e:
+                        log(f"  decode-priority error: {e!r}")
                 self._ticket = BUDGET.admit(cost, label)
+                if DPRI and self._ticket is not None:
+                    self._dp = DPRI.start(stream, fresh)
                 if self._ticket is None:
                     self._send_json(503, {"error": {"message": f"Loom busy: waited {BUDGET.timeout:.0f}s for {cost:,} tokens of KV budget",
                                                     "type": "server_error", "code": "budget_timeout"}})
@@ -1130,6 +1223,8 @@ class Proxy(BaseHTTPRequestHandler):
                 ch = d.get("choices") or []
                 if first_tok is None and any((c.get("delta") or {}).get(k) for c in ch for k in ("content", "reasoning_content", "reasoning", "tool_calls")):
                     first_tok = time.time()
+                    if DPRI and getattr(self, "_dp", None) is not None:
+                        DPRI.first(self._dp)
                 if meter:
                     for c_ in ch:
                         dl = c_.get("delta") or {}
@@ -1139,6 +1234,8 @@ class Proxy(BaseHTTPRequestHandler):
                         for tc in dl.get("tool_calls") or []:
                             meter.text(((tc.get("function") or {}).get("arguments")) or "")
                 for c_ in ch:   # accumulate what the model generated (for EchoCheck)
+                    if c_.get("finish_reason"):
+                        gen["finish"] = c_["finish_reason"]
                     dl = c_.get("delta") or {}
                     if isinstance(dl.get("content"), str):
                         gen["content"] += dl["content"]
@@ -1233,7 +1330,7 @@ class Proxy(BaseHTTPRequestHandler):
             try:
                 rj = json.loads(raw)
                 usage = rj.get("usage") or usage
-                mm = ((rj.get("choices") or [{}])[0].get("message") or {})
+                mm = ((rj.get("choices") or [{}])[0].get("message") or {}); gen["finish"] = (rj.get("choices") or [{}])[0].get("finish_reason")
                 gen["content"] = mm.get("content") or ""
                 gen["reasoning"] = mm.get("reasoning_content") or mm.get("reasoning") or ""
                 gen["tc"] = {i: {"name": (t.get("function") or {}).get("name"), "arguments": (t.get("function") or {}).get("arguments"),
@@ -1263,6 +1360,11 @@ class Proxy(BaseHTTPRequestHandler):
             if usage:
                 pt = int(usage.get("prompt_tokens") or 0); gt = int(usage.get("completion_tokens") or 0)
                 ct = int((usage.get("prompt_tokens_details") or {}).get("cached_tokens") or 0)
+                if DPRI and r.status == 200 and self._echo_msgs is not None:
+                    try:
+                        DPRI.record(self._echo_msgs, pt, gt, gen["finish"])
+                    except Exception as e:
+                        log(f"  decode-priority record error: {e!r}")
             end = time.time()
             speed = ""
             if ttft and pt:
@@ -1281,15 +1383,19 @@ class Proxy(BaseHTTPRequestHandler):
             st = BUDGET.status()
             if SYSCKPT:
                 st["sys_checkpoints"] = SYSCKPT.status()
+            if DPRI:
+                st["decode_priority"] = DPRI.status()
             self._send_json(200, st)
             return
         self._relay("GET")
 
     def do_POST(self):
-        self._ticket = None; self._ck = None; self._plain_body = None; self._plain_msgs = None
+        self._ticket = None; self._ck = None; self._plain_body = None; self._plain_msgs = None; self._dp = None
         try:
             self._relay("POST")
         finally:
+            if self._dp is not None:
+                DPRI.end(self._dp)
             if self._ticket is not None:
                 BUDGET.release(self._ticket)
 
@@ -1306,5 +1412,6 @@ if __name__ == "__main__":
     log(f"proxy :{LISTEN} -> loom :{BACKEND} ({TAG}), model 'local' accepted; KV budget guard: "
         + (f"{BUDGET.budget:,} tokens, max {BUDGET.max_active} active, queue timeout {BUDGET.timeout:.0f}s" if BUDGET.budget else "off")
         + f"; system-prompt checkpoints: {'on, capacity ' + str(SYSCKPT.cap) if SYSCKPT else 'off'}"
-        + f"; vision offload: {'on' if VOFF else 'off'}")
+        + f"; vision offload: {'on' if VOFF else 'off'}"
+        + f"; decode priority: {'on, >= %d fresh tokens, max wait %.0fs' % (DPRI.min, DPRI.wait) if DPRI else 'off'}")
     srv.serve_forever()

@@ -74,6 +74,12 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
   start, so `systemctl --user restart inkling-proxy` applies them without reloading Loom.
 - optional **system-prompt checkpoints** (`LOOM_SYS_CHECKPOINT=1` with `LOOM_CHECKPOINT_CAPACITY>0` and a card `checkpoint_capacity`).
   New conversations reuse a shared long system prompt without Loom's prefix cache; see below.
+- optional **decode priority** (`LOOM_DECODE_PRIORITY=1`, needs the budget guard). While Loom reads a long cold prompt, every chat
+  that is replying drops to ~2 tok/s (see Known limits). This holds a request that needs at least `LOOM_DECODE_PRIORITY_MIN`
+  (8192) uncached tokens while another chat is mid-reply, for at most `LOOM_DECODE_PRIORITY_WAIT` (30) seconds. The uncached part
+  is estimated from the conversation's previous turn, and counted in full when the history no longer matches what was generated
+  or the previous reply hit `max_tokens`, so cached agent turns are not held. Measured: the replying chat stays at 89 tok/s
+  instead of 65 tok/s with 0.55 s stalls; the held 21K prompt gets its first token after 19 s instead of 6.5 s.
 
 ### Decode attention v2
 The stock decode attention gives each of the 3 query heads of a KV head its own wave. Each lane holds 4 of the 128 dims and walks
@@ -161,6 +167,10 @@ that key (and on their later turns), and sends `X-Loom-Checkpoint` on each conve
   2048-token block. Each endpoint also holds recurrent state, and they block reclaim of idle histories: with 512 endpoints the
   model failed after ~30. The concurrent profile turns the prefix cache off.
 - `continuation_epochs: 2` requires a nonzero `draft_depth` (startup fails with INVALID_ARGUMENT otherwise).
+- **A long prefill slows every replying chat to ~2 tok/s.** Each Loom submission carries up to `prefill_capacity` prompt tokens
+  plus one token per replying row, and a 2048-token chunk takes ~0.5 s. A chat replying at 91 tok/s gets 2.1 tok/s while a 25K
+  prompt is read (~7 s; ~2 minutes for 255K). `prefill_capacity` 1024 gives 3.5 tok/s for 6-10% slower prefill; the drafter
+  gives 3.2 tok/s. Optional decode priority in the proxy avoids it for cold prompts by holding them briefly.
 - **A tool parameter named `image_url` turns the whole request into a vision request** in loom-serve 0.2.0. There is then no
   turn-to-turn reuse, and "trailing JSON input" 500s happen sometimes. Agents with a vision tool hit this on every turn. `bin/proxy.py` aliases
   such parameters to `image_ref` and maps them back (`LOOM_PARAM_ALIAS=0` to disable). Measured with a 20-tool agent: 0% -> 99.9% reuse.
