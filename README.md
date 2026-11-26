@@ -52,6 +52,8 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
 6. **Decode attention v2** (`tools/gen_attn_split_v2.py SRC DST --span`): rewrites the single-token decode attention
    `g_ink_attn_split` and adds `g_ink_attn_split_span_v2`. The new kernel is dispatched for pure-decode epochs, where every
    span is one token (`t == spans`). Multi-token spans keep the stock span kernel. See below.
+7. **Fused RMS norm + q8 quantize** (`tools/gen_fuse_nq.py SRC DST`): the norm before attention and before the experts and the
+   q8 quantize that always follows it become one kernel, `g_ink_rms_norm_plane_q8x`. Bit-identical. See below.
 
 `bin/proxy.py` sits in front of Loom on :1234:
 - serves the `local` alias and `/props`
@@ -130,6 +132,20 @@ Time to first token, single cold prompt (same session, drafter off):
 
 8 tiles per workgroup was slightly slower than 4 (255K: 130.6 s without key-major staging, against 129.7 s for 4). Prefetch alone
 needed 218 VGPRs (6 waves/SIMD) and gave 119.0 s; the broadcast brings it back to 7 waves.
+
+### Decode: fused RMS norm + q8 quantize
+At batch 1, decode spends a few ms per token in small per-layer kernels that move almost no data (norms, quantize, mixes) rather
+than in reading weights. A duplication profile (each kernel family launched twice) put the routed-expert matvecs at ~86% of the
+640 GB/s spec, the output head at ~574 GB/s, and the small latency-bound kernels at ~2.4 ms of a ~10.8 ms token. One of those is
+the q8 quantize that follows every RMS norm (96 per token): a separate kernel that re-reads the normalized row. The fused kernel
+keeps the stock norm and quantizes in registers: in its second loop each lane holds 4 values of one 32-value q8 group, the 8 lanes
+of a group combine the abs-max and integer sum with xor shuffles, and each lane quantizes its own 4 values with the stock
+arithmetic. Output is **bit-identical** (same tokens on the long, short and span equivalence sets). Single-chat decode, short
+context: **93.3 -> 95.5 tok/s (+2.4%)**; 4 chats 196.9 tok/s combined; prefill and the prefill stall unchanged.
+
+Fusing more neighbours (the mix before each norm, the expert combine with the following short conv and residual add) was also
+bit-identical but gave ~0.1% more, so it is not included: removing a kernel boundary saves only ~0.2 us here; what costs time is
+the work inside the small kernels.
 
 ### Running several chats: `INKLING_PROFILE=concurrent`
 ```bash
