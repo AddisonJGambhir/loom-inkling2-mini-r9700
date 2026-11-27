@@ -62,8 +62,8 @@ directory). You can also copy them yourself into `~/.local/share/inkling-r9700/m
 
 ## Path B: stock upstream, PR not merged
 
-You need eight files from the fork branch:
-`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `tools/gen_swa_v2.py`, `tools/gen_small_decode.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
+You need nine files from the fork branch:
+`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `tools/gen_swa_v2.py`, `tools/gen_small_decode.py`, `tools/gen_prefill_attn_v3.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
 
 **1. Kernel.** Generate it from your own `llm.loom` rather than copying ours, so it matches your package version:
 
@@ -74,11 +74,12 @@ python3 -I tools/gen_fuse_nq.py /tmp/llm.v2.loom /tmp/llm.v2.loom               
 python3 -I tools/gen_moe_f16_act.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                             # optional: direct f16 MoE act (+2-6% prefill, bit-identical)
 python3 -I tools/gen_swa_v2.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                                  # optional: SWA decode v2 (+2.5% c1, +6.8% c4)
 python3 -I tools/gen_small_decode.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                            # optional: coalesced ctrl_apply + 1-barrier mix2..5/concat_rms (+1-2.4% decode)
+python3 -I tools/gen_prefill_attn_v3.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                         # optional: prefill attn v3 (f16 KV dequant + 2-page scalar lookup + SWA key-major, bit-identical)
 sha256sum package/program/llm.loom /tmp/llm.v2.loom
 ```
 
-From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), all six steps produce `792ce64d808d823c`, the exact
-file on this branch (`16b3c7c20523ae04` without `gen_small_decode.py`, `7617edbcaa80e50f` without the last two, `cdb6a1894f000744` without the last three). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
+From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), all seven steps produce `2610b880445ee38f`, the exact
+file on this branch (`792ce64d808d823c` without `gen_prefill_attn_v3.py`, `16b3c7c20523ae04` without the last two, `7617edbcaa80e50f` without the last three). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
 with an error otherwise. Install it with `cp /tmp/llm.v2.loom ~/.local/share/inkling-r9700/model/program/llm.loom`, then
 `bin/inkling-r9700 restart`. The first start compiles the changed kernels (seconds to a minute).
 

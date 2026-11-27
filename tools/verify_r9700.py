@@ -113,6 +113,7 @@ def check_kernel():
     prefill_4tile = f >= 0 and "%clanes = index.constant 384 : index" in t[f:f + 400]
     flash = t[f:t.find("\n  kernel.return\n}\n", f)] if f >= 0 else ""
     prefill_prefetch = "%pf0_kp_raw" in flash
+    prefill_v3 = "%v3_map = buffer.view %origins[%v3_map_off]" in flash
     fused_norm_q8 = 'kernel.def export("g_ink_rms_norm_plane_q8x")' in t
     moe_f16_act = "%f16_out_lo = buffer.view %w_stage" in t
     swa_v2 = 'kernel.def export("g_ink_attn_split_swa_span_v2")' in t
@@ -134,13 +135,16 @@ def check_kernel():
                 subprocess.run([sys.executable, "-I", os.path.join(here, "gen_swa_v2.py"), out, out], check=True, capture_output=True)
             if small_decode:
                 subprocess.run([sys.executable, "-I", os.path.join(here, "gen_small_decode.py"), out, out], check=True, capture_output=True)
+            if prefill_v3:
+                subprocess.run([sys.executable, "-I", os.path.join(here, "gen_prefill_attn_v3.py"), out, out], check=True, capture_output=True)
             regen = open(out).read() == t
         finally:
             if os.path.exists(out):
                 os.remove(out)
     return report("kernel", has_v2 and one_wave and regen is not False, llm_sha256_16=sha, span_v2=has_v2, single_token_v2=one_wave,
-                  prefill_4tile=prefill_4tile, prefill_prefetch=prefill_prefetch, fused_norm_q8=fused_norm_q8,
-                  moe_f16_act=moe_f16_act, swa_v2=swa_v2, small_decode=small_decode, regenerated_identically=regen)
+                  prefill_4tile=prefill_4tile, prefill_prefetch=prefill_prefetch, prefill_v3=prefill_v3,
+                  fused_norm_q8=fused_norm_q8, moe_f16_act=moe_f16_act, swa_v2=swa_v2, small_decode=small_decode,
+                  regenerated_identically=regen)
 
 
 def decode_tps(n_tokens, seed):

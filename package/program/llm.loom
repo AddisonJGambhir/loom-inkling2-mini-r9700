@@ -28562,140 +28562,137 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
   %st_seg_p0 = index.div %st_slot_cl_p0, %st_keys32 : index
   %st_dim_val_p0 = index.mul %st_seg_p0, %cdpt : index
   %st_dim_p0 = index.assume %st_dim_val_p0 [range(%st_dim_val_p0, 0, 112)] : index
-  %st_add_p1 = index.constant 192 : index
-  %st_slot_p1 = index.add %workitem, %st_add_p1 : index
-  %st_live_p1 = scalar.constant false : i1
-  %st_slot_cl_p1 = index.min %st_slot_p1, %c_slots_less : index
-  %st_key_val_p1 = index.div %st_slot_cl_p1, %ctpk : index
-  %st_key_p1 = index.assume %st_key_val_p1 [range(%st_key_val_p1, 0, 31)] : index
-  %st_seg_p1 = index.rem %st_slot_cl_p1, %ctpk : index
-  %st_dim_val_p1 = index.mul %st_seg_p1, %cdpt : index
-  %st_dim_p1 = index.assume %st_dim_val_p1 [range(%st_dim_val_p1, 0, 112)] : index
+  %v3_c40 = index.constant 40 : offset
+  %v3_rec_off = index.scale %row, %v3_c40 : index, offset -> offset
+  %v3_rec32 = buffer.view %origins[%v3_rec_off] : buffer -> view<10xi32>
+  %v3_mlo_r = view.load %v3_rec32[8] : view<10xi32> -> i32
+  %v3_mhi_r = view.load %v3_rec32[9] : view<10xi32> -> i32
+  %v3_mlo = kernel.subgroup.broadcast %v3_mlo_r from %c0_i32 : i32, i32
+  %v3_mhi = kernel.subgroup.broadcast %v3_mhi_r from %c0_i32 : i32, i32
+  %v3_mlo64 = scalar.extui %v3_mlo : i32 to i64
+  %v3_mhi64 = scalar.extui %v3_mhi : i32 to i64
+  %v3_sh32 = scalar.constant 32 : i64
+  %v3_mhi_s = scalar.shli %v3_mhi64, %v3_sh32 : i64
+  %v3_map64 = scalar.ori %v3_mhi_s, %v3_mlo64 : i64
+  %v3_map_b = scalar.assume %v3_map64 [range(%v3_map64, 0, 9223372036854775807)] : i64
+  %v3_map_off = index.cast %v3_map_b : i64 to offset
+  %v3_map = buffer.view %origins[%v3_map_off] : buffer -> view<[%blocks]xi32>
+  %v3_last_blk = index.sub %blocks, %c1 : index
+  %v3_plane_base = index.mul %k_plane, %pool : index
+  %v3_c1024 = index.constant 1024 : offset
+  %v3_c32 = index.constant 32 : index
+  %v3_zero_h = scalar.constant 0.0 : f16
+  %v3_dim_i = index.cast %st_dim_p0 : index to i32
+  %v3_dim_b = kernel.subgroup.broadcast %v3_dim_i from %c0_i32 : i32, i32
+  %v3_dim_u = index.cast %v3_dim_b : i32 to index
+  %v3_dim = index.assume %v3_dim_u [range(%v3_dim_u, 0, 112)] : index
+  %v3_bv = index.div %v3_dim, %v3_c32 : index
+  %v3_bb = index.assume %v3_bv [range(%v3_bv, 0, 3)] : index
+  %v3_live_i = scf.select %st_live_p0, %c1_i32m, %c0_i32 : i32
+  %v3_live_b = kernel.subgroup.broadcast %v3_live_i from %c0_i32 : i32, i32
+  %v3_live = scalar.cmpi ne, %v3_live_b, %c0_i32 : i32
   %pf_zq = vector.splati 0 : vector<16xi8>
-  %pf0_kp_raw = index.add %key_low, %st_key_p0 : index
-  %pf0_ok0 = index.cmp ule, %pf0_kp_raw, %pos_last : index
-  %pf0_ok1 = scalar.andi %pf0_ok0, %st_live_p0 : i1
-  %pf0_k, %pf0_v, %pf0_sk, %pf0_sv = scf.if %pf0_ok1 -> (vector<16xi8>, vector<16xi8>, f32, f32) {
-    %pf0_kp = index.assume %pf0_kp_raw [range(%pf0_kp_raw, 0, 1048575)] : index
-    %pf0_koff = func.call @g_kv_offset8(%origins, %row, %pf0_kp, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-    %pf0_voff = index.add %pf0_koff, %plane_stride : offset
-    %pf0_c1024 = index.constant 1024 : offset
-    %pf0_kc = buffer.view %arena[%pf0_koff] : buffer -> view<8x128xi8>
-    %pf0_kso = index.add %pf0_koff, %pf0_c1024 : offset
-    %pf0_ks = buffer.view %arena[%pf0_kso] : buffer -> view<8x4xf16>
-    %pf0_vc = buffer.view %arena[%pf0_voff] : buffer -> view<8x128xi8>
-    %pf0_vso = index.add %pf0_voff, %pf0_c1024 : offset
-    %pf0_vs = buffer.view %arena[%pf0_vso] : buffer -> view<8x4xf16>
-    %pf0_c32 = index.constant 32 : index
-    %pf0_bv = index.div %st_dim_p0, %pf0_c32 : index
-    %pf0_bb = index.assume %pf0_bv [range(%pf0_bv, 0, 3)] : index
-    %pf0_kq = vector.load %pf0_kc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-    %pf0_ks16 = view.load %pf0_ks[%kv, %pf0_bb] : view<8x4xf16> -> f16
-    %pf0_ksf = scalar.extf %pf0_ks16 : f16 to f32
-    %pf0_vq = vector.load %pf0_vc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-    %pf0_vs16 = view.load %pf0_vs[%kv, %pf0_bb] : view<8x4xf16> -> f16
-    %pf0_vsf = scalar.extf %pf0_vs16 : f16 to f32
-    scf.yield %pf0_kq, %pf0_vq, %pf0_ksf, %pf0_vsf : vector<16xi8>, vector<16xi8>, f32, f32
+  %pf0_k, %pf0_v, %pf0_sk, %pf0_sv = scf.if %v3_live -> (vector<16xi8>, vector<16xi8>, f16, f16) {
+    %pf0_p0_raw = index.div %key_low, %c16 : index
+    %pf0_p0_cl = index.min %pf0_p0_raw, %v3_last_blk : index
+    %pf0_p0 = index.assume %pf0_p0_cl [range(%pf0_p0_cl, 0, %v3_last_blk), lt(%pf0_p0_cl, %blocks)] : index
+    %pf0_p1_raw = index.add %pf0_p0, %c1 : index
+    %pf0_p1_cl = index.min %pf0_p1_raw, %v3_last_blk : index
+    %pf0_p1 = index.assume %pf0_p1_cl [range(%pf0_p1_cl, 0, %v3_last_blk), lt(%pf0_p1_cl, %blocks)] : index
+    %pf0_phys0_r = view.load %v3_map[%pf0_p0] : view<[%blocks]xi32> -> i32
+    %pf0_phys1_r = view.load %v3_map[%pf0_p1] : view<[%blocks]xi32> -> i32
+    %pf0_phys0 = kernel.subgroup.broadcast %pf0_phys0_r from %c0_i32 : i32, i32
+    %pf0_phys1 = kernel.subgroup.broadcast %pf0_phys1_r from %c0_i32 : i32, i32
+    %pf0_kp_raw = index.add %key_low, %st_key_p0 : index
+    %pf0_ok = index.cmp ule, %pf0_kp_raw, %pos_last : index
+    %pf0_ki, %pf0_vi, %pf0_ski, %pf0_svi = scf.if %pf0_ok -> (vector<16xi8>, vector<16xi8>, f16, f16) {
+      %pf0_phys32 = scf.select %hi_half, %pf0_phys1, %pf0_phys0 : i32
+      %pf0_phys_b = scalar.assume %pf0_phys32 [range(%pf0_phys32, 0, 134217727)] : i32
+      %pf0_phys = index.cast %pf0_phys_b : i32 to index
+      %pf0_pbase = index.mul %pf0_phys, %c16 : index
+      %pf0_slot = index.add %pf0_pbase, %lane_col : index
+      %pf0_pslot = index.add %v3_plane_base, %pf0_slot : index
+      %pf0_koff = index.scale %pf0_pslot, %pos_bytes : index, offset -> offset
+      %pf0_voff = index.add %pf0_koff, %plane_stride : offset
+      %pf0_kc = buffer.view %arena[%pf0_koff] : buffer -> view<8x128xi8>
+      %pf0_kso = index.add %pf0_koff, %v3_c1024 : offset
+      %pf0_ks = buffer.view %arena[%pf0_kso] : buffer -> view<8x4xf16>
+      %pf0_vc = buffer.view %arena[%pf0_voff] : buffer -> view<8x128xi8>
+      %pf0_vso = index.add %pf0_voff, %v3_c1024 : offset
+      %pf0_vs = buffer.view %arena[%pf0_vso] : buffer -> view<8x4xf16>
+      %pf0_kq = vector.load %pf0_kc[%kv, %v3_dim] : view<8x128xi8> -> vector<16xi8>
+      %pf0_ks16 = view.load %pf0_ks[%kv, %v3_bb] : view<8x4xf16> -> f16
+      %pf0_vq = vector.load %pf0_vc[%kv, %v3_dim] : view<8x128xi8> -> vector<16xi8>
+      %pf0_vs16 = view.load %pf0_vs[%kv, %v3_bb] : view<8x4xf16> -> f16
+      scf.yield %pf0_kq, %pf0_vq, %pf0_ks16, %pf0_vs16 : vector<16xi8>, vector<16xi8>, f16, f16
+    } else {
+      scf.yield %pf_zq, %pf_zq, %v3_zero_h, %v3_zero_h : vector<16xi8>, vector<16xi8>, f16, f16
+    }
+    scf.yield %pf0_ki, %pf0_vi, %pf0_ski, %pf0_svi : vector<16xi8>, vector<16xi8>, f16, f16
   } else {
-    scf.yield %pf_zq, %pf_zq, %zero_f, %zero_f : vector<16xi8>, vector<16xi8>, f32, f32
+    scf.yield %pf_zq, %pf_zq, %v3_zero_h, %v3_zero_h : vector<16xi8>, vector<16xi8>, f16, f16
   }
-  %m_final, %l_final, %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7, %pf_kf, %pf_vf, %pf_skf, %pf_svf = scf.for %kt = [%c0 to %key_tiles step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>, %pk = %pf0_k : vector<16xi8>, %pv = %pf0_v : vector<16xi8>, %psk = %pf0_sk : f32, %psv = %pf0_sv : f32) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xi8>, vector<16xi8>, f32, f32) {
+  %m_final, %l_final, %o0, %o1, %o2, %o3, %o4, %o5, %o6, %o7, %pf_kf, %pf_vf, %pf_skf, %pf_svf = scf.for %kt = [%c0 to %key_tiles step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>, %pk = %pf0_k : vector<16xi8>, %pv = %pf0_v : vector<16xi8>, %psk = %pf0_sk : f16, %psv = %pf0_sv : f16) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xi8>, vector<16xi8>, f16, f16) {
     %tile_first = index.madd %kt, %ckt, %key_low : index
-    scf.if %st_live_p0 {
-    %pf_kfl = vector.sitofp %pk : vector<16xi8> to vector<16xf32>
-    %pf_ksp = vector.splat %psk : vector<16xf32>
-    %pf_kd = vector.mulf %pf_kfl, %pf_ksp : vector<16xf32>
-    %kvals_p0 = vector.fptrunc %pf_kd : vector<16xf32> to vector<16xf16>
-    %pf_vfl = vector.sitofp %pv : vector<16xi8> to vector<16xf32>
-    %pf_vsp = vector.splat %psv : vector<16xf32>
-    %pf_vd = vector.mulf %pf_vfl, %pf_vsp : vector<16xf32>
-    %vvals_p0 = vector.fptrunc %pf_vd : vector<16xf32> to vector<16xf16>
-    vector.store %kvals_p0, %k_view[%st_key_p0, %st_dim_p0] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p0 = [%c0 to %cdpt step %c1] unroll {
-      %vj_p0 = vector.extract %vvals_p0[%j_p0] : vector<16xf16> -> f16
-      %vt_row_val_p0 = index.add %st_dim_p0, %j_p0 : index
-      %vt_row_p0 = index.assume %vt_row_val_p0 [range(%vt_row_val_p0, 0, 127)] : index
-      view.store %vj_p0, %vt_view[%vt_row_p0, %st_key_p0] : f16, view<128x40xf16>
-    }
-    }
-    scf.if %st_live_p1 {
-      %key_pos_p1 = index.add %tile_first, %st_key_p1 : index
-      %key_valid_p1 = index.cmp ule, %key_pos_p1, %pos_last : index
-      %kvals_p1, %vvals_p1 = scf.if %key_valid_p1 -> (vector<16xf16>, vector<16xf16>) {
-        %kp_p1 = index.assume %key_pos_p1 [range(%key_pos_p1, 0, 1048575)] : index
-        %k_off_p1 = func.call @g_kv_offset8(%origins, %row, %kp_p1, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-        %v_off_p1 = index.add %k_off_p1, %plane_stride : offset
-        %k_cache_p1 = buffer.view %arena[%k_off_p1] : buffer -> view<8x128xi8>
-        %kv8_c_345 = index.constant 1024 : offset
-        %kv8_so_346 = index.add %k_off_p1, %kv8_c_345 : offset
-        %kv8_s_347 = buffer.view %arena[%kv8_so_346] : buffer -> view<8x4xf16>
-        %v_cache_p1 = buffer.view %arena[%v_off_p1] : buffer -> view<8x128xi8>
-        %kv8_c_348 = index.constant 1024 : offset
-        %kv8_so_349 = index.add %v_off_p1, %kv8_c_348 : offset
-        %kv8_s_350 = buffer.view %arena[%kv8_so_349] : buffer -> view<8x4xf16>
-        %kv8_q_351 = vector.load %k_cache_p1[%kv, %st_dim_p1] : view<8x128xi8> -> vector<16xi8>
-        %kv8_cd_352 = index.constant 32 : index
-        %kv8_bv_353 = index.div %st_dim_p1, %kv8_cd_352 : index
-        %kv8_bb_354 = index.assume %kv8_bv_353 [range(%kv8_bv_353, 0, 3)] : index
-        %kv8_s16_355 = view.load %kv8_s_347[%kv, %kv8_bb_354] : view<8x4xf16> -> f16
-        %kv8_s_356 = scalar.extf %kv8_s16_355 : f16 to f32
-        %kv8_f_357 = vector.sitofp %kv8_q_351 : vector<16xi8> to vector<16xf32>
-        %kv8_sp_358 = vector.splat %kv8_s_356 : vector<16xf32>
-        %kv8_d_359 = vector.mulf %kv8_f_357, %kv8_sp_358 : vector<16xf32>
-        %kh_p1 = vector.fptrunc %kv8_d_359 : vector<16xf32> to vector<16xf16>
-        %kv8_q_360 = vector.load %v_cache_p1[%kv, %st_dim_p1] : view<8x128xi8> -> vector<16xi8>
-        %kv8_cd_361 = index.constant 32 : index
-        %kv8_bv_362 = index.div %st_dim_p1, %kv8_cd_361 : index
-        %kv8_bb_363 = index.assume %kv8_bv_362 [range(%kv8_bv_362, 0, 3)] : index
-        %kv8_s16_364 = view.load %kv8_s_350[%kv, %kv8_bb_363] : view<8x4xf16> -> f16
-        %kv8_s_365 = scalar.extf %kv8_s16_364 : f16 to f32
-        %kv8_f_366 = vector.sitofp %kv8_q_360 : vector<16xi8> to vector<16xf32>
-        %kv8_sp_367 = vector.splat %kv8_s_365 : vector<16xf32>
-        %kv8_d_368 = vector.mulf %kv8_f_366, %kv8_sp_367 : vector<16xf32>
-        %vh_p1 = vector.fptrunc %kv8_d_368 : vector<16xf32> to vector<16xf16>
-        scf.yield %kh_p1, %vh_p1 : vector<16xf16>, vector<16xf16>
-      } else {
-        scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-      }
-      vector.store %kvals_p1, %k_view[%st_key_p1, %st_dim_p1] : vector<16xf16>, view<32x136xf16>
-      scf.for %j_p1 = [%c0 to %cdpt step %c1] unroll {
-        %vj_p1 = vector.extract %vvals_p1[%j_p1] : vector<16xf16> -> f16
-        %vt_row_val_p1 = index.add %st_dim_p1, %j_p1 : index
-        %vt_row_p1 = index.assume %vt_row_val_p1 [range(%vt_row_val_p1, 0, 127)] : index
-        view.store %vj_p1, %vt_view[%vt_row_p1, %st_key_p1] : f16, view<128x40xf16>
+    scf.if %v3_live {
+      %pf_kh = vector.sitofp %pk : vector<16xi8> to vector<16xf16>
+      %pf_ksp = vector.splat %psk : vector<16xf16>
+      %kvals_p0 = vector.mulf %pf_kh, %pf_ksp : vector<16xf16>
+      %pf_vh = vector.sitofp %pv : vector<16xi8> to vector<16xf16>
+      %pf_vsp = vector.splat %psv : vector<16xf16>
+      %vvals_p0 = vector.mulf %pf_vh, %pf_vsp : vector<16xf16>
+      vector.store %kvals_p0, %k_view[%st_key_p0, %v3_dim] : vector<16xf16>, view<32x136xf16>
+      scf.for %j_p0 = [%c0 to %cdpt step %c1] unroll {
+        %vj_p0 = vector.extract %vvals_p0[%j_p0] : vector<16xf16> -> f16
+        %vt_row_val_p0 = index.add %v3_dim, %j_p0 : index
+        %vt_row_p0 = index.assume %vt_row_val_p0 [range(%vt_row_val_p0, 0, 127)] : index
+        view.store %vj_p0, %vt_view[%vt_row_p0, %st_key_p0] : f16, view<128x40xf16>
       }
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
     %pf_ktn = index.add %kt, %c1 : index
     %pf_has = index.cmp ult, %pf_ktn, %key_tiles : index
     %pf_tfn = index.madd %pf_ktn, %ckt, %key_low : index
-    %pfn_kp_raw = index.add %pf_tfn, %st_key_p0 : index
-    %pfn_ok0 = index.cmp ule, %pfn_kp_raw, %pos_last : index
-    %pfn_ok1 = scalar.andi %pfn_ok0, %st_live_p0 : i1
-    %pfn_ok = scalar.andi %pfn_ok1, %pf_has : i1
-    %pfn_k, %pfn_v, %pfn_sk, %pfn_sv = scf.if %pfn_ok -> (vector<16xi8>, vector<16xi8>, f32, f32) {
-      %pfn_kp = index.assume %pfn_kp_raw [range(%pfn_kp_raw, 0, 1048575)] : index
-      %pfn_koff = func.call @g_kv_offset8(%origins, %row, %pfn_kp, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-      %pfn_voff = index.add %pfn_koff, %plane_stride : offset
-      %pfn_c1024 = index.constant 1024 : offset
-      %pfn_kc = buffer.view %arena[%pfn_koff] : buffer -> view<8x128xi8>
-      %pfn_kso = index.add %pfn_koff, %pfn_c1024 : offset
-      %pfn_ks = buffer.view %arena[%pfn_kso] : buffer -> view<8x4xf16>
-      %pfn_vc = buffer.view %arena[%pfn_voff] : buffer -> view<8x128xi8>
-      %pfn_vso = index.add %pfn_voff, %pfn_c1024 : offset
-      %pfn_vs = buffer.view %arena[%pfn_vso] : buffer -> view<8x4xf16>
-      %pfn_c32 = index.constant 32 : index
-      %pfn_bv = index.div %st_dim_p0, %pfn_c32 : index
-      %pfn_bb = index.assume %pfn_bv [range(%pfn_bv, 0, 3)] : index
-      %pfn_kq = vector.load %pfn_kc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %pfn_ks16 = view.load %pfn_ks[%kv, %pfn_bb] : view<8x4xf16> -> f16
-      %pfn_ksf = scalar.extf %pfn_ks16 : f16 to f32
-      %pfn_vq = vector.load %pfn_vc[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %pfn_vs16 = view.load %pfn_vs[%kv, %pfn_bb] : view<8x4xf16> -> f16
-      %pfn_vsf = scalar.extf %pfn_vs16 : f16 to f32
-      scf.yield %pfn_kq, %pfn_vq, %pfn_ksf, %pfn_vsf : vector<16xi8>, vector<16xi8>, f32, f32
+    %pfn_tile_ok = scalar.andi %v3_live, %pf_has : i1
+    %pfn_k, %pfn_v, %pfn_sk, %pfn_sv = scf.if %pfn_tile_ok -> (vector<16xi8>, vector<16xi8>, f16, f16) {
+      %pfn_p0_raw = index.div %pf_tfn, %c16 : index
+      %pfn_p0_cl = index.min %pfn_p0_raw, %v3_last_blk : index
+      %pfn_p0 = index.assume %pfn_p0_cl [range(%pfn_p0_cl, 0, %v3_last_blk), lt(%pfn_p0_cl, %blocks)] : index
+      %pfn_p1_raw = index.add %pfn_p0, %c1 : index
+      %pfn_p1_cl = index.min %pfn_p1_raw, %v3_last_blk : index
+      %pfn_p1 = index.assume %pfn_p1_cl [range(%pfn_p1_cl, 0, %v3_last_blk), lt(%pfn_p1_cl, %blocks)] : index
+      %pfn_phys0_r = view.load %v3_map[%pfn_p0] : view<[%blocks]xi32> -> i32
+      %pfn_phys1_r = view.load %v3_map[%pfn_p1] : view<[%blocks]xi32> -> i32
+      %pfn_phys0 = kernel.subgroup.broadcast %pfn_phys0_r from %c0_i32 : i32, i32
+      %pfn_phys1 = kernel.subgroup.broadcast %pfn_phys1_r from %c0_i32 : i32, i32
+      %pfn_kp_raw = index.add %pf_tfn, %st_key_p0 : index
+      %pfn_ok = index.cmp ule, %pfn_kp_raw, %pos_last : index
+      %pfn_ki, %pfn_vi, %pfn_ski, %pfn_svi = scf.if %pfn_ok -> (vector<16xi8>, vector<16xi8>, f16, f16) {
+        %pfn_phys32 = scf.select %hi_half, %pfn_phys1, %pfn_phys0 : i32
+        %pfn_phys_b = scalar.assume %pfn_phys32 [range(%pfn_phys32, 0, 134217727)] : i32
+        %pfn_phys = index.cast %pfn_phys_b : i32 to index
+        %pfn_pbase = index.mul %pfn_phys, %c16 : index
+        %pfn_slot = index.add %pfn_pbase, %lane_col : index
+        %pfn_pslot = index.add %v3_plane_base, %pfn_slot : index
+        %pfn_koff = index.scale %pfn_pslot, %pos_bytes : index, offset -> offset
+        %pfn_voff = index.add %pfn_koff, %plane_stride : offset
+        %pfn_kc = buffer.view %arena[%pfn_koff] : buffer -> view<8x128xi8>
+        %pfn_kso = index.add %pfn_koff, %v3_c1024 : offset
+        %pfn_ks = buffer.view %arena[%pfn_kso] : buffer -> view<8x4xf16>
+        %pfn_vc = buffer.view %arena[%pfn_voff] : buffer -> view<8x128xi8>
+        %pfn_vso = index.add %pfn_voff, %v3_c1024 : offset
+        %pfn_vs = buffer.view %arena[%pfn_vso] : buffer -> view<8x4xf16>
+        %pfn_kq = vector.load %pfn_kc[%kv, %v3_dim] : view<8x128xi8> -> vector<16xi8>
+        %pfn_ks16 = view.load %pfn_ks[%kv, %v3_bb] : view<8x4xf16> -> f16
+        %pfn_vq = vector.load %pfn_vc[%kv, %v3_dim] : view<8x128xi8> -> vector<16xi8>
+        %pfn_vs16 = view.load %pfn_vs[%kv, %v3_bb] : view<8x4xf16> -> f16
+        scf.yield %pfn_kq, %pfn_vq, %pfn_ks16, %pfn_vs16 : vector<16xi8>, vector<16xi8>, f16, f16
+      } else {
+        scf.yield %pf_zq, %pf_zq, %v3_zero_h, %v3_zero_h : vector<16xi8>, vector<16xi8>, f16, f16
+      }
+      scf.yield %pfn_ki, %pfn_vi, %pfn_ski, %pfn_svi : vector<16xi8>, vector<16xi8>, f16, f16
     } else {
-      scf.yield %pf_zq, %pf_zq, %zero_f, %zero_f : vector<16xi8>, vector<16xi8>, f32, f32
+      scf.yield %pf_zq, %pf_zq, %v3_zero_h, %v3_zero_h : vector<16xi8>, vector<16xi8>, f16, f16
     }
     %tf32 = index.cast %tile_first : index to i32
     %kl0_0 = vector.fragment.load<lhs> %k_view[%kb0_row, %d0] shape [%c16, %c16] : view<32x136xf16> -> vector<8xf16>
@@ -29342,7 +29339,7 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_ts2_rdna4") @g_ink_atte
       scf.yield %pl0_1, %pl1_1, %pl2_1, %pl3_1, %pl4_1, %pl5_1, %pl6_1, %pl7_1 : vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
-    scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7, %pfn_k, %pfn_v, %pfn_sk, %pfn_sv : f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xi8>, vector<16xi8>, f32, f32
+    scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7, %pfn_k, %pfn_v, %pfn_sk, %pfn_sv : f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<16xi8>, vector<16xi8>, f16, f16
   }
   %one_f = scalar.constant 1.0 : f32
   %inv_l = scalar.divf %one_f, %l_final : f32
@@ -32070,144 +32067,147 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_partial_rdna4") @g_ink_
   %st_seg_p2 = index.rem %st_slot_cl_p2, %ctpk : index
   %st_dim_val_p2 = index.mul %st_seg_p2, %cdpt : index
   %st_dim_p2 = index.assume %st_dim_val_p2 [range(%st_dim_val_p2, 0, 112)] : index
+  %v3_c40 = index.constant 40 : offset
+  %v3_rec_off = index.scale %row, %v3_c40 : index, offset -> offset
+  %v3_rec32 = buffer.view %origins[%v3_rec_off] : buffer -> view<10xi32>
+  %v3_mlo_r = view.load %v3_rec32[8] : view<10xi32> -> i32
+  %v3_mhi_r = view.load %v3_rec32[9] : view<10xi32> -> i32
+  %v3_mlo = kernel.subgroup.broadcast %v3_mlo_r from %c0_i32 : i32, i32
+  %v3_mhi = kernel.subgroup.broadcast %v3_mhi_r from %c0_i32 : i32, i32
+  %v3_mlo64 = scalar.extui %v3_mlo : i32 to i64
+  %v3_mhi64 = scalar.extui %v3_mhi : i32 to i64
+  %v3_sh32 = scalar.constant 32 : i64
+  %v3_mhi_s = scalar.shli %v3_mhi64, %v3_sh32 : i64
+  %v3_map64 = scalar.ori %v3_mhi_s, %v3_mlo64 : i64
+  %v3_map_b = scalar.assume %v3_map64 [range(%v3_map64, 0, 9223372036854775807)] : i64
+  %v3_map_off = index.cast %v3_map_b : i64 to offset
+  %v3_map = buffer.view %origins[%v3_map_off] : buffer -> view<[%blocks]xi32>
+  %v3_last_blk = index.sub %blocks, %c1 : index
+  %v3_plane_base = index.mul %k_plane, %pool : index
+  %v3_c1024 = index.constant 1024 : offset
+  %v3_c32 = index.constant 32 : index
+  %km_zh = scalar.constant 0.0 : f16
+  %km_wu_i = index.cast %wave : index to i32
+  %km_wu_b = kernel.subgroup.broadcast %km_wu_i from %c0_i32 : i32, i32
+  %km_wu = index.cast %km_wu_b : i32 to index
+  %km_d0_v = index.mul %km_wu, %c16 : index
+  %km_dim0 = index.assume %km_d0_v [range(%km_d0_v, 0, 112)] : index
+  %km_bv0 = index.div %km_dim0, %v3_c32 : index
+  %km_bb0 = index.assume %km_bv0 [range(%km_bv0, 0, 3)] : index
+  %km_c48 = index.constant 48 : index
+  %km_d1_v = index.add %km_dim0, %km_c48 : index
+  %km_dim1 = index.assume %km_d1_v [range(%km_d1_v, 0, 112)] : index
+  %km_bv1 = index.div %km_dim1, %v3_c32 : index
+  %km_bb1 = index.assume %km_bv1 [range(%km_bv1, 0, 3)] : index
+  %km_live2 = index.cmp ult, %km_wu, %c2 : index
+  %km_w2 = index.min %km_wu, %c1 : index
+  %km_d2_a = index.mul %km_w2, %c16 : index
+  %km_c96 = index.constant 96 : index
+  %km_d2_v = index.add %km_d2_a, %km_c96 : index
+  %km_dim2 = index.assume %km_d2_v [range(%km_d2_v, 0, 112)] : index
+  %km_bv2 = index.div %km_dim2, %v3_c32 : index
+  %km_bb2 = index.assume %km_bv2 [range(%km_bv2, 0, 3)] : index
   %kt_hot = index.sub %key_tiles, %c1 : index
   %m_hot, %l_hot, %o0_hot, %o1_hot, %o2_hot, %o3_hot, %o4_hot, %o5_hot, %o6_hot, %o7_hot = scf.for %kt = [%c0 to %kt_hot step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
     %tile_first = index.madd %kt, %ckt, %key_low : index
-    %key_pos_p0 = index.add %tile_first, %st_key_p0 : index
-    %key_valid_p0 = index.cmp ule, %key_pos_p0, %pos_hi : index
-    %kvals_p0, %vvals_p0 = scf.if %key_valid_p0 -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p0 = index.assume %key_pos_p0 [range(%key_pos_p0, 0, 1048575)] : index
-      %k_off_p0 = func.call @g_kv_offset8(%origins, %row, %kp_p0, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-      %v_off_p0 = index.add %k_off_p0, %plane_stride : offset
-      %k_cache_p0 = buffer.view %arena[%k_off_p0] : buffer -> view<8x128xi8>
-      %kv8_c_513 = index.constant 1024 : offset
-      %kv8_so_514 = index.add %k_off_p0, %kv8_c_513 : offset
-      %kv8_s_515 = buffer.view %arena[%kv8_so_514] : buffer -> view<8x4xf16>
-      %v_cache_p0 = buffer.view %arena[%v_off_p0] : buffer -> view<8x128xi8>
-      %kv8_c_516 = index.constant 1024 : offset
-      %kv8_so_517 = index.add %v_off_p0, %kv8_c_516 : offset
-      %kv8_s_518 = buffer.view %arena[%kv8_so_517] : buffer -> view<8x4xf16>
-      %kv8_q_519 = vector.load %k_cache_p0[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_520 = index.constant 32 : index
-      %kv8_bv_521 = index.div %st_dim_p0, %kv8_cd_520 : index
-      %kv8_bb_522 = index.assume %kv8_bv_521 [range(%kv8_bv_521, 0, 3)] : index
-      %kv8_s16_523 = view.load %kv8_s_515[%kv, %kv8_bb_522] : view<8x4xf16> -> f16
-      %kv8_s_524 = scalar.extf %kv8_s16_523 : f16 to f32
-      %kv8_f_525 = vector.sitofp %kv8_q_519 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_526 = vector.splat %kv8_s_524 : vector<16xf32>
-      %kv8_d_527 = vector.mulf %kv8_f_525, %kv8_sp_526 : vector<16xf32>
-      %kh_p0 = vector.fptrunc %kv8_d_527 : vector<16xf32> to vector<16xf16>
-      %kv8_q_528 = vector.load %v_cache_p0[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_529 = index.constant 32 : index
-      %kv8_bv_530 = index.div %st_dim_p0, %kv8_cd_529 : index
-      %kv8_bb_531 = index.assume %kv8_bv_530 [range(%kv8_bv_530, 0, 3)] : index
-      %kv8_s16_532 = view.load %kv8_s_518[%kv, %kv8_bb_531] : view<8x4xf16> -> f16
-      %kv8_s_533 = scalar.extf %kv8_s16_532 : f16 to f32
-      %kv8_f_534 = vector.sitofp %kv8_q_528 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_535 = vector.splat %kv8_s_533 : vector<16xf32>
-      %kv8_d_536 = vector.mulf %kv8_f_534, %kv8_sp_535 : vector<16xf32>
-      %vh_p0 = vector.fptrunc %kv8_d_536 : vector<16xf32> to vector<16xf16>
-      scf.yield %kh_p0, %vh_p0 : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p0, %k_view[%st_key_p0, %st_dim_p0] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p0 = [%c0 to %cdpt step %c1] unroll {
-      %vj_p0 = vector.extract %vvals_p0[%j_p0] : vector<16xf16> -> f16
-      %vt_row_val_p0 = index.add %st_dim_p0, %j_p0 : index
-      %vt_row_p0 = index.assume %vt_row_val_p0 [range(%vt_row_val_p0, 0, 127)] : index
-      view.store %vj_p0, %vt_view[%vt_row_p0, %st_key_p0] : f16, view<128x40xf16>
-    }
-    %key_pos_p1 = index.add %tile_first, %st_key_p1 : index
-    %key_valid_p1 = index.cmp ule, %key_pos_p1, %pos_hi : index
-    %kvals_p1, %vvals_p1 = scf.if %key_valid_p1 -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p1 = index.assume %key_pos_p1 [range(%key_pos_p1, 0, 1048575)] : index
-      %k_off_p1 = func.call @g_kv_offset8(%origins, %row, %kp_p1, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-      %v_off_p1 = index.add %k_off_p1, %plane_stride : offset
-      %k_cache_p1 = buffer.view %arena[%k_off_p1] : buffer -> view<8x128xi8>
-      %kv8_c_537 = index.constant 1024 : offset
-      %kv8_so_538 = index.add %k_off_p1, %kv8_c_537 : offset
-      %kv8_s_539 = buffer.view %arena[%kv8_so_538] : buffer -> view<8x4xf16>
-      %v_cache_p1 = buffer.view %arena[%v_off_p1] : buffer -> view<8x128xi8>
-      %kv8_c_540 = index.constant 1024 : offset
-      %kv8_so_541 = index.add %v_off_p1, %kv8_c_540 : offset
-      %kv8_s_542 = buffer.view %arena[%kv8_so_541] : buffer -> view<8x4xf16>
-      %kv8_q_543 = vector.load %k_cache_p1[%kv, %st_dim_p1] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_544 = index.constant 32 : index
-      %kv8_bv_545 = index.div %st_dim_p1, %kv8_cd_544 : index
-      %kv8_bb_546 = index.assume %kv8_bv_545 [range(%kv8_bv_545, 0, 3)] : index
-      %kv8_s16_547 = view.load %kv8_s_539[%kv, %kv8_bb_546] : view<8x4xf16> -> f16
-      %kv8_s_548 = scalar.extf %kv8_s16_547 : f16 to f32
-      %kv8_f_549 = vector.sitofp %kv8_q_543 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_550 = vector.splat %kv8_s_548 : vector<16xf32>
-      %kv8_d_551 = vector.mulf %kv8_f_549, %kv8_sp_550 : vector<16xf32>
-      %kh_p1 = vector.fptrunc %kv8_d_551 : vector<16xf32> to vector<16xf16>
-      %kv8_q_552 = vector.load %v_cache_p1[%kv, %st_dim_p1] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_553 = index.constant 32 : index
-      %kv8_bv_554 = index.div %st_dim_p1, %kv8_cd_553 : index
-      %kv8_bb_555 = index.assume %kv8_bv_554 [range(%kv8_bv_554, 0, 3)] : index
-      %kv8_s16_556 = view.load %kv8_s_542[%kv, %kv8_bb_555] : view<8x4xf16> -> f16
-      %kv8_s_557 = scalar.extf %kv8_s16_556 : f16 to f32
-      %kv8_f_558 = vector.sitofp %kv8_q_552 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_559 = vector.splat %kv8_s_557 : vector<16xf32>
-      %kv8_d_560 = vector.mulf %kv8_f_558, %kv8_sp_559 : vector<16xf32>
-      %vh_p1 = vector.fptrunc %kv8_d_560 : vector<16xf32> to vector<16xf16>
-      scf.yield %kh_p1, %vh_p1 : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p1, %k_view[%st_key_p1, %st_dim_p1] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p1 = [%c0 to %cdpt step %c1] unroll {
-      %vj_p1 = vector.extract %vvals_p1[%j_p1] : vector<16xf16> -> f16
-      %vt_row_val_p1 = index.add %st_dim_p1, %j_p1 : index
-      %vt_row_p1 = index.assume %vt_row_val_p1 [range(%vt_row_val_p1, 0, 127)] : index
-      view.store %vj_p1, %vt_view[%vt_row_p1, %st_key_p1] : f16, view<128x40xf16>
-    }
-    scf.if %st_live_p2 {
-      %key_pos_p2 = index.add %tile_first, %st_key_p2 : index
-      %key_valid_p2 = index.cmp ule, %key_pos_p2, %pos_hi : index
-      %kvals_p2, %vvals_p2 = scf.if %key_valid_p2 -> (vector<16xf16>, vector<16xf16>) {
-        %kp_p2 = index.assume %key_pos_p2 [range(%key_pos_p2, 0, 1048575)] : index
-        %k_off_p2 = func.call @g_kv_offset8(%origins, %row, %kp_p2, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-        %v_off_p2 = index.add %k_off_p2, %plane_stride : offset
-        %k_cache_p2 = buffer.view %arena[%k_off_p2] : buffer -> view<8x128xi8>
-        %kv8_c_561 = index.constant 1024 : offset
-        %kv8_so_562 = index.add %k_off_p2, %kv8_c_561 : offset
-        %kv8_s_563 = buffer.view %arena[%kv8_so_562] : buffer -> view<8x4xf16>
-        %v_cache_p2 = buffer.view %arena[%v_off_p2] : buffer -> view<8x128xi8>
-        %kv8_c_564 = index.constant 1024 : offset
-        %kv8_so_565 = index.add %v_off_p2, %kv8_c_564 : offset
-        %kv8_s_566 = buffer.view %arena[%kv8_so_565] : buffer -> view<8x4xf16>
-        %kv8_q_567 = vector.load %k_cache_p2[%kv, %st_dim_p2] : view<8x128xi8> -> vector<16xi8>
-        %kv8_cd_568 = index.constant 32 : index
-        %kv8_bv_569 = index.div %st_dim_p2, %kv8_cd_568 : index
-        %kv8_bb_570 = index.assume %kv8_bv_569 [range(%kv8_bv_569, 0, 3)] : index
-        %kv8_s16_571 = view.load %kv8_s_563[%kv, %kv8_bb_570] : view<8x4xf16> -> f16
-        %kv8_s_572 = scalar.extf %kv8_s16_571 : f16 to f32
-        %kv8_f_573 = vector.sitofp %kv8_q_567 : vector<16xi8> to vector<16xf32>
-        %kv8_sp_574 = vector.splat %kv8_s_572 : vector<16xf32>
-        %kv8_d_575 = vector.mulf %kv8_f_573, %kv8_sp_574 : vector<16xf32>
-        %kh_p2 = vector.fptrunc %kv8_d_575 : vector<16xf32> to vector<16xf16>
-        %kv8_q_576 = vector.load %v_cache_p2[%kv, %st_dim_p2] : view<8x128xi8> -> vector<16xi8>
-        %kv8_cd_577 = index.constant 32 : index
-        %kv8_bv_578 = index.div %st_dim_p2, %kv8_cd_577 : index
-        %kv8_bb_579 = index.assume %kv8_bv_578 [range(%kv8_bv_578, 0, 3)] : index
-        %kv8_s16_580 = view.load %kv8_s_566[%kv, %kv8_bb_579] : view<8x4xf16> -> f16
-        %kv8_s_581 = scalar.extf %kv8_s16_580 : f16 to f32
-        %kv8_f_582 = vector.sitofp %kv8_q_576 : vector<16xi8> to vector<16xf32>
-        %kv8_sp_583 = vector.splat %kv8_s_581 : vector<16xf32>
-        %kv8_d_584 = vector.mulf %kv8_f_582, %kv8_sp_583 : vector<16xf32>
-        %vh_p2 = vector.fptrunc %kv8_d_584 : vector<16xf32> to vector<16xf16>
-        scf.yield %kh_p2, %vh_p2 : vector<16xf16>, vector<16xf16>
-      } else {
-        scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
+    %pk_p0_raw = index.div %tile_first, %c16 : index
+    %pk_p0_cl = index.min %pk_p0_raw, %v3_last_blk : index
+    %pk_p0 = index.assume %pk_p0_cl [range(%pk_p0_cl, 0, %v3_last_blk), lt(%pk_p0_cl, %blocks)] : index
+    %pk_p1_raw = index.add %pk_p0, %c1 : index
+    %pk_p1_cl = index.min %pk_p1_raw, %v3_last_blk : index
+    %pk_p1 = index.assume %pk_p1_cl [range(%pk_p1_cl, 0, %v3_last_blk), lt(%pk_p1_cl, %blocks)] : index
+    %pk_phys0_r = view.load %v3_map[%pk_p0] : view<[%blocks]xi32> -> i32
+    %pk_phys1_r = view.load %v3_map[%pk_p1] : view<[%blocks]xi32> -> i32
+    %pk_phys0 = kernel.subgroup.broadcast %pk_phys0_r from %c0_i32 : i32, i32
+    %pk_phys1 = kernel.subgroup.broadcast %pk_phys1_r from %c0_i32 : i32, i32
+    %pk_kp = index.add %tile_first, %lane : index
+    %pk_valid = index.cmp ule, %pk_kp, %pos_hi : index
+    scf.if %pk_valid {
+      %pk_phys32 = scf.select %hi_half, %pk_phys1, %pk_phys0 : i32
+      %pk_phys_b = scalar.assume %pk_phys32 [range(%pk_phys32, 0, 134217727)] : i32
+      %pk_phys = index.cast %pk_phys_b : i32 to index
+      %pk_pbase = index.mul %pk_phys, %c16 : index
+      %pk_slot = index.add %pk_pbase, %lane_col : index
+      %pk_pslot = index.add %v3_plane_base, %pk_slot : index
+      %pk_koff = index.scale %pk_pslot, %pos_bytes : index, offset -> offset
+      %pk_voff = index.add %pk_koff, %plane_stride : offset
+      %pk_kc = buffer.view %arena[%pk_koff] : buffer -> view<8x128xi8>
+      %pk_kso = index.add %pk_koff, %v3_c1024 : offset
+      %pk_ks = buffer.view %arena[%pk_kso] : buffer -> view<8x4xf16>
+      %pk_vc = buffer.view %arena[%pk_voff] : buffer -> view<8x128xi8>
+      %pk_vso = index.add %pk_voff, %v3_c1024 : offset
+      %pk_vs = buffer.view %arena[%pk_vso] : buffer -> view<8x4xf16>
+      %pk_kq0 = vector.load %pk_kc[%kv, %km_dim0] : view<8x128xi8> -> vector<16xi8>
+      %pk_ks16_0 = view.load %pk_ks[%kv, %km_bb0] : view<8x4xf16> -> f16
+      %pk_kh0 = vector.sitofp %pk_kq0 : vector<16xi8> to vector<16xf16>
+      %pk_ksp0 = vector.splat %pk_ks16_0 : vector<16xf16>
+      %pk_kd0 = vector.mulf %pk_kh0, %pk_ksp0 : vector<16xf16>
+      vector.store %pk_kd0, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+      %pk_vq0 = vector.load %pk_vc[%kv, %km_dim0] : view<8x128xi8> -> vector<16xi8>
+      %pk_vs16_0 = view.load %pk_vs[%kv, %km_bb0] : view<8x4xf16> -> f16
+      %pk_vh0 = vector.sitofp %pk_vq0 : vector<16xi8> to vector<16xf16>
+      %pk_vsp0 = vector.splat %pk_vs16_0 : vector<16xf16>
+      %pk_vd0 = vector.mulf %pk_vh0, %pk_vsp0 : vector<16xf16>
+      scf.for %pk_j0 = [%c0 to %cdpt step %c1] unroll {
+        %pk_vj0 = vector.extract %pk_vd0[%pk_j0] : vector<16xf16> -> f16
+        %pk_vr0 = index.add %km_dim0, %pk_j0 : index
+        %pk_vrb0 = index.assume %pk_vr0 [range(%pk_vr0, 0, 127)] : index
+        view.store %pk_vj0, %vt_view[%pk_vrb0, %lane] : f16, view<128x40xf16>
       }
-      vector.store %kvals_p2, %k_view[%st_key_p2, %st_dim_p2] : vector<16xf16>, view<32x136xf16>
-      scf.for %j_p2 = [%c0 to %cdpt step %c1] unroll {
-        %vj_p2 = vector.extract %vvals_p2[%j_p2] : vector<16xf16> -> f16
-        %vt_row_val_p2 = index.add %st_dim_p2, %j_p2 : index
-        %vt_row_p2 = index.assume %vt_row_val_p2 [range(%vt_row_val_p2, 0, 127)] : index
-        view.store %vj_p2, %vt_view[%vt_row_p2, %st_key_p2] : f16, view<128x40xf16>
+      %pk_kq1 = vector.load %pk_kc[%kv, %km_dim1] : view<8x128xi8> -> vector<16xi8>
+      %pk_ks16_1 = view.load %pk_ks[%kv, %km_bb1] : view<8x4xf16> -> f16
+      %pk_kh1 = vector.sitofp %pk_kq1 : vector<16xi8> to vector<16xf16>
+      %pk_ksp1 = vector.splat %pk_ks16_1 : vector<16xf16>
+      %pk_kd1 = vector.mulf %pk_kh1, %pk_ksp1 : vector<16xf16>
+      vector.store %pk_kd1, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+      %pk_vq1 = vector.load %pk_vc[%kv, %km_dim1] : view<8x128xi8> -> vector<16xi8>
+      %pk_vs16_1 = view.load %pk_vs[%kv, %km_bb1] : view<8x4xf16> -> f16
+      %pk_vh1 = vector.sitofp %pk_vq1 : vector<16xi8> to vector<16xf16>
+      %pk_vsp1 = vector.splat %pk_vs16_1 : vector<16xf16>
+      %pk_vd1 = vector.mulf %pk_vh1, %pk_vsp1 : vector<16xf16>
+      scf.for %pk_j1 = [%c0 to %cdpt step %c1] unroll {
+        %pk_vj1 = vector.extract %pk_vd1[%pk_j1] : vector<16xf16> -> f16
+        %pk_vr1 = index.add %km_dim1, %pk_j1 : index
+        %pk_vrb1 = index.assume %pk_vr1 [range(%pk_vr1, 0, 127)] : index
+        view.store %pk_vj1, %vt_view[%pk_vrb1, %lane] : f16, view<128x40xf16>
+      }
+      scf.if %km_live2 {
+        %pk_kq2 = vector.load %pk_kc[%kv, %km_dim2] : view<8x128xi8> -> vector<16xi8>
+        %pk_ks16_2 = view.load %pk_ks[%kv, %km_bb2] : view<8x4xf16> -> f16
+        %pk_kh2 = vector.sitofp %pk_kq2 : vector<16xi8> to vector<16xf16>
+        %pk_ksp2 = vector.splat %pk_ks16_2 : vector<16xf16>
+        %pk_kd2 = vector.mulf %pk_kh2, %pk_ksp2 : vector<16xf16>
+        vector.store %pk_kd2, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+        %pk_vq2 = vector.load %pk_vc[%kv, %km_dim2] : view<8x128xi8> -> vector<16xi8>
+        %pk_vs16_2 = view.load %pk_vs[%kv, %km_bb2] : view<8x4xf16> -> f16
+        %pk_vh2 = vector.sitofp %pk_vq2 : vector<16xi8> to vector<16xf16>
+        %pk_vsp2 = vector.splat %pk_vs16_2 : vector<16xf16>
+        %pk_vd2 = vector.mulf %pk_vh2, %pk_vsp2 : vector<16xf16>
+        scf.for %pk_j2 = [%c0 to %cdpt step %c1] unroll {
+          %pk_vj2 = vector.extract %pk_vd2[%pk_j2] : vector<16xf16> -> f16
+          %pk_vr2 = index.add %km_dim2, %pk_j2 : index
+          %pk_vrb2 = index.assume %pk_vr2 [range(%pk_vr2, 0, 127)] : index
+          view.store %pk_vj2, %vt_view[%pk_vrb2, %lane] : f16, view<128x40xf16>
+        }
+      }
+    } else {
+      vector.store %kz, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+      vector.store %kz, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+      scf.for %pk_jz0 = [%c0 to %cdpt step %c1] unroll {
+        %pk_z0 = index.add %km_dim0, %pk_jz0 : index
+        %pk_zb0 = index.assume %pk_z0 [range(%pk_z0, 0, 127)] : index
+        view.store %km_zh, %vt_view[%pk_zb0, %lane] : f16, view<128x40xf16>
+        %pk_z1 = index.add %km_dim1, %pk_jz0 : index
+        %pk_zb1 = index.assume %pk_z1 [range(%pk_z1, 0, 127)] : index
+        view.store %km_zh, %vt_view[%pk_zb1, %lane] : f16, view<128x40xf16>
+      }
+      scf.if %km_live2 {
+        vector.store %kz, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+        scf.for %pk_jz2 = [%c0 to %cdpt step %c1] unroll {
+          %pk_z2 = index.add %km_dim2, %pk_jz2 : index
+          %pk_zb2 = index.assume %pk_z2 [range(%pk_z2, 0, 127)] : index
+          view.store %km_zh, %vt_view[%pk_zb2, %lane] : f16, view<128x40xf16>
+        }
       }
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -32859,141 +32859,104 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_partial_rdna4") @g_ink_
     scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7 : f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
   }
     %tile_first_pt = index.madd %kt_hot, %ckt, %key_low : index
-    %key_pos_p0_pt = index.add %tile_first_pt, %st_key_p0 : index
-    %key_valid_p0_pt = index.cmp ule, %key_pos_p0_pt, %pos_hi : index
-    %kvals_p0_pt, %vvals_p0_pt = scf.if %key_valid_p0_pt -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p0_pt = index.assume %key_pos_p0_pt [range(%key_pos_p0_pt, 0, 1048575)] : index
-      %k_off_p0_pt = func.call @g_kv_offset8(%origins, %row, %kp_p0_pt, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-      %v_off_p0_pt = index.add %k_off_p0_pt, %plane_stride : offset
-      %k_cache_p0_pt = buffer.view %arena[%k_off_p0_pt] : buffer -> view<8x128xi8>
-      %kv8_c_585 = index.constant 1024 : offset
-      %kv8_so_586 = index.add %k_off_p0_pt, %kv8_c_585 : offset
-      %kv8_s_587 = buffer.view %arena[%kv8_so_586] : buffer -> view<8x4xf16>
-      %v_cache_p0_pt = buffer.view %arena[%v_off_p0_pt] : buffer -> view<8x128xi8>
-      %kv8_c_588 = index.constant 1024 : offset
-      %kv8_so_589 = index.add %v_off_p0_pt, %kv8_c_588 : offset
-      %kv8_s_590 = buffer.view %arena[%kv8_so_589] : buffer -> view<8x4xf16>
-      %kv8_q_591 = vector.load %k_cache_p0_pt[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_592 = index.constant 32 : index
-      %kv8_bv_593 = index.div %st_dim_p0, %kv8_cd_592 : index
-      %kv8_bb_594 = index.assume %kv8_bv_593 [range(%kv8_bv_593, 0, 3)] : index
-      %kv8_s16_595 = view.load %kv8_s_587[%kv, %kv8_bb_594] : view<8x4xf16> -> f16
-      %kv8_s_596 = scalar.extf %kv8_s16_595 : f16 to f32
-      %kv8_f_597 = vector.sitofp %kv8_q_591 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_598 = vector.splat %kv8_s_596 : vector<16xf32>
-      %kv8_d_599 = vector.mulf %kv8_f_597, %kv8_sp_598 : vector<16xf32>
-      %kh_p0_pt = vector.fptrunc %kv8_d_599 : vector<16xf32> to vector<16xf16>
-      %kv8_q_600 = vector.load %v_cache_p0_pt[%kv, %st_dim_p0] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_601 = index.constant 32 : index
-      %kv8_bv_602 = index.div %st_dim_p0, %kv8_cd_601 : index
-      %kv8_bb_603 = index.assume %kv8_bv_602 [range(%kv8_bv_602, 0, 3)] : index
-      %kv8_s16_604 = view.load %kv8_s_590[%kv, %kv8_bb_603] : view<8x4xf16> -> f16
-      %kv8_s_605 = scalar.extf %kv8_s16_604 : f16 to f32
-      %kv8_f_606 = vector.sitofp %kv8_q_600 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_607 = vector.splat %kv8_s_605 : vector<16xf32>
-      %kv8_d_608 = vector.mulf %kv8_f_606, %kv8_sp_607 : vector<16xf32>
-      %vh_p0_pt = vector.fptrunc %kv8_d_608 : vector<16xf32> to vector<16xf16>
-      scf.yield %kh_p0_pt, %vh_p0_pt : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p0_pt, %k_view[%st_key_p0, %st_dim_p0] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p0_pt = [%c0 to %cdpt step %c1] unroll {
-      %vj_p0_pt = vector.extract %vvals_p0_pt[%j_p0_pt] : vector<16xf16> -> f16
-      %vt_row_val_p0_pt = index.add %st_dim_p0, %j_p0_pt : index
-      %vt_row_p0_pt = index.assume %vt_row_val_p0_pt [range(%vt_row_val_p0_pt, 0, 127)] : index
-      view.store %vj_p0_pt, %vt_view[%vt_row_p0_pt, %st_key_p0] : f16, view<128x40xf16>
-    }
-    %key_pos_p1_pt = index.add %tile_first_pt, %st_key_p1 : index
-    %key_valid_p1_pt = index.cmp ule, %key_pos_p1_pt, %pos_hi : index
-    %kvals_p1_pt, %vvals_p1_pt = scf.if %key_valid_p1_pt -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p1_pt = index.assume %key_pos_p1_pt [range(%key_pos_p1_pt, 0, 1048575)] : index
-      %k_off_p1_pt = func.call @g_kv_offset8(%origins, %row, %kp_p1_pt, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-      %v_off_p1_pt = index.add %k_off_p1_pt, %plane_stride : offset
-      %k_cache_p1_pt = buffer.view %arena[%k_off_p1_pt] : buffer -> view<8x128xi8>
-      %kv8_c_609 = index.constant 1024 : offset
-      %kv8_so_610 = index.add %k_off_p1_pt, %kv8_c_609 : offset
-      %kv8_s_611 = buffer.view %arena[%kv8_so_610] : buffer -> view<8x4xf16>
-      %v_cache_p1_pt = buffer.view %arena[%v_off_p1_pt] : buffer -> view<8x128xi8>
-      %kv8_c_612 = index.constant 1024 : offset
-      %kv8_so_613 = index.add %v_off_p1_pt, %kv8_c_612 : offset
-      %kv8_s_614 = buffer.view %arena[%kv8_so_613] : buffer -> view<8x4xf16>
-      %kv8_q_615 = vector.load %k_cache_p1_pt[%kv, %st_dim_p1] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_616 = index.constant 32 : index
-      %kv8_bv_617 = index.div %st_dim_p1, %kv8_cd_616 : index
-      %kv8_bb_618 = index.assume %kv8_bv_617 [range(%kv8_bv_617, 0, 3)] : index
-      %kv8_s16_619 = view.load %kv8_s_611[%kv, %kv8_bb_618] : view<8x4xf16> -> f16
-      %kv8_s_620 = scalar.extf %kv8_s16_619 : f16 to f32
-      %kv8_f_621 = vector.sitofp %kv8_q_615 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_622 = vector.splat %kv8_s_620 : vector<16xf32>
-      %kv8_d_623 = vector.mulf %kv8_f_621, %kv8_sp_622 : vector<16xf32>
-      %kh_p1_pt = vector.fptrunc %kv8_d_623 : vector<16xf32> to vector<16xf16>
-      %kv8_q_624 = vector.load %v_cache_p1_pt[%kv, %st_dim_p1] : view<8x128xi8> -> vector<16xi8>
-      %kv8_cd_625 = index.constant 32 : index
-      %kv8_bv_626 = index.div %st_dim_p1, %kv8_cd_625 : index
-      %kv8_bb_627 = index.assume %kv8_bv_626 [range(%kv8_bv_626, 0, 3)] : index
-      %kv8_s16_628 = view.load %kv8_s_614[%kv, %kv8_bb_627] : view<8x4xf16> -> f16
-      %kv8_s_629 = scalar.extf %kv8_s16_628 : f16 to f32
-      %kv8_f_630 = vector.sitofp %kv8_q_624 : vector<16xi8> to vector<16xf32>
-      %kv8_sp_631 = vector.splat %kv8_s_629 : vector<16xf32>
-      %kv8_d_632 = vector.mulf %kv8_f_630, %kv8_sp_631 : vector<16xf32>
-      %vh_p1_pt = vector.fptrunc %kv8_d_632 : vector<16xf32> to vector<16xf16>
-      scf.yield %kh_p1_pt, %vh_p1_pt : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p1_pt, %k_view[%st_key_p1, %st_dim_p1] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p1_pt = [%c0 to %cdpt step %c1] unroll {
-      %vj_p1_pt = vector.extract %vvals_p1_pt[%j_p1_pt] : vector<16xf16> -> f16
-      %vt_row_val_p1_pt = index.add %st_dim_p1, %j_p1_pt : index
-      %vt_row_p1_pt = index.assume %vt_row_val_p1_pt [range(%vt_row_val_p1_pt, 0, 127)] : index
-      view.store %vj_p1_pt, %vt_view[%vt_row_p1_pt, %st_key_p1] : f16, view<128x40xf16>
-    }
-    scf.if %st_live_p2 {
-      %key_pos_p2_pt = index.add %tile_first_pt, %st_key_p2 : index
-      %key_valid_p2_pt = index.cmp ule, %key_pos_p2_pt, %pos_hi : index
-      %kvals_p2_pt, %vvals_p2_pt = scf.if %key_valid_p2_pt -> (vector<16xf16>, vector<16xf16>) {
-        %kp_p2_pt = index.assume %key_pos_p2_pt [range(%key_pos_p2_pt, 0, 1048575)] : index
-        %k_off_p2_pt = func.call @g_kv_offset8(%origins, %row, %kp_p2_pt, %blocks, %k_plane, %pool) : (buffer, index, index, index, index, index) -> (offset)
-        %v_off_p2_pt = index.add %k_off_p2_pt, %plane_stride : offset
-        %k_cache_p2_pt = buffer.view %arena[%k_off_p2_pt] : buffer -> view<8x128xi8>
-        %kv8_c_633 = index.constant 1024 : offset
-        %kv8_so_634 = index.add %k_off_p2_pt, %kv8_c_633 : offset
-        %kv8_s_635 = buffer.view %arena[%kv8_so_634] : buffer -> view<8x4xf16>
-        %v_cache_p2_pt = buffer.view %arena[%v_off_p2_pt] : buffer -> view<8x128xi8>
-        %kv8_c_636 = index.constant 1024 : offset
-        %kv8_so_637 = index.add %v_off_p2_pt, %kv8_c_636 : offset
-        %kv8_s_638 = buffer.view %arena[%kv8_so_637] : buffer -> view<8x4xf16>
-        %kv8_q_639 = vector.load %k_cache_p2_pt[%kv, %st_dim_p2] : view<8x128xi8> -> vector<16xi8>
-        %kv8_cd_640 = index.constant 32 : index
-        %kv8_bv_641 = index.div %st_dim_p2, %kv8_cd_640 : index
-        %kv8_bb_642 = index.assume %kv8_bv_641 [range(%kv8_bv_641, 0, 3)] : index
-        %kv8_s16_643 = view.load %kv8_s_635[%kv, %kv8_bb_642] : view<8x4xf16> -> f16
-        %kv8_s_644 = scalar.extf %kv8_s16_643 : f16 to f32
-        %kv8_f_645 = vector.sitofp %kv8_q_639 : vector<16xi8> to vector<16xf32>
-        %kv8_sp_646 = vector.splat %kv8_s_644 : vector<16xf32>
-        %kv8_d_647 = vector.mulf %kv8_f_645, %kv8_sp_646 : vector<16xf32>
-        %kh_p2_pt = vector.fptrunc %kv8_d_647 : vector<16xf32> to vector<16xf16>
-        %kv8_q_648 = vector.load %v_cache_p2_pt[%kv, %st_dim_p2] : view<8x128xi8> -> vector<16xi8>
-        %kv8_cd_649 = index.constant 32 : index
-        %kv8_bv_650 = index.div %st_dim_p2, %kv8_cd_649 : index
-        %kv8_bb_651 = index.assume %kv8_bv_650 [range(%kv8_bv_650, 0, 3)] : index
-        %kv8_s16_652 = view.load %kv8_s_638[%kv, %kv8_bb_651] : view<8x4xf16> -> f16
-        %kv8_s_653 = scalar.extf %kv8_s16_652 : f16 to f32
-        %kv8_f_654 = vector.sitofp %kv8_q_648 : vector<16xi8> to vector<16xf32>
-        %kv8_sp_655 = vector.splat %kv8_s_653 : vector<16xf32>
-        %kv8_d_656 = vector.mulf %kv8_f_654, %kv8_sp_655 : vector<16xf32>
-        %vh_p2_pt = vector.fptrunc %kv8_d_656 : vector<16xf32> to vector<16xf16>
-        scf.yield %kh_p2_pt, %vh_p2_pt : vector<16xf16>, vector<16xf16>
-      } else {
-        scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
+    %pk_p0_raw_pt = index.div %tile_first_pt, %c16 : index
+    %pk_p0_cl_pt = index.min %pk_p0_raw_pt, %v3_last_blk : index
+    %pk_p0_pt = index.assume %pk_p0_cl_pt [range(%pk_p0_cl_pt, 0, %v3_last_blk), lt(%pk_p0_cl_pt, %blocks)] : index
+    %pk_p1_raw_pt = index.add %pk_p0_pt, %c1 : index
+    %pk_p1_cl_pt = index.min %pk_p1_raw_pt, %v3_last_blk : index
+    %pk_p1_pt = index.assume %pk_p1_cl_pt [range(%pk_p1_cl_pt, 0, %v3_last_blk), lt(%pk_p1_cl_pt, %blocks)] : index
+    %pk_phys0_r_pt = view.load %v3_map[%pk_p0_pt] : view<[%blocks]xi32> -> i32
+    %pk_phys1_r_pt = view.load %v3_map[%pk_p1_pt] : view<[%blocks]xi32> -> i32
+    %pk_phys0_pt = kernel.subgroup.broadcast %pk_phys0_r_pt from %c0_i32 : i32, i32
+    %pk_phys1_pt = kernel.subgroup.broadcast %pk_phys1_r_pt from %c0_i32 : i32, i32
+    %pk_kp_pt = index.add %tile_first_pt, %lane : index
+    %pk_valid_pt = index.cmp ule, %pk_kp_pt, %pos_hi : index
+    scf.if %pk_valid_pt {
+      %pk_phys32_pt = scf.select %hi_half, %pk_phys1_pt, %pk_phys0_pt : i32
+      %pk_phys_b_pt = scalar.assume %pk_phys32_pt [range(%pk_phys32_pt, 0, 134217727)] : i32
+      %pk_phys_pt = index.cast %pk_phys_b_pt : i32 to index
+      %pk_pbase_pt = index.mul %pk_phys_pt, %c16 : index
+      %pk_slot_pt = index.add %pk_pbase_pt, %lane_col : index
+      %pk_pslot_pt = index.add %v3_plane_base, %pk_slot_pt : index
+      %pk_koff_pt = index.scale %pk_pslot_pt, %pos_bytes : index, offset -> offset
+      %pk_voff_pt = index.add %pk_koff_pt, %plane_stride : offset
+      %pk_kc_pt = buffer.view %arena[%pk_koff_pt] : buffer -> view<8x128xi8>
+      %pk_kso_pt = index.add %pk_koff_pt, %v3_c1024 : offset
+      %pk_ks_pt = buffer.view %arena[%pk_kso_pt] : buffer -> view<8x4xf16>
+      %pk_vc_pt = buffer.view %arena[%pk_voff_pt] : buffer -> view<8x128xi8>
+      %pk_vso_pt = index.add %pk_voff_pt, %v3_c1024 : offset
+      %pk_vs_pt = buffer.view %arena[%pk_vso_pt] : buffer -> view<8x4xf16>
+      %pk_kq0_pt = vector.load %pk_kc_pt[%kv, %km_dim0] : view<8x128xi8> -> vector<16xi8>
+      %pk_ks16_0_pt = view.load %pk_ks_pt[%kv, %km_bb0] : view<8x4xf16> -> f16
+      %pk_kh0_pt = vector.sitofp %pk_kq0_pt : vector<16xi8> to vector<16xf16>
+      %pk_ksp0_pt = vector.splat %pk_ks16_0_pt : vector<16xf16>
+      %pk_kd0_pt = vector.mulf %pk_kh0_pt, %pk_ksp0_pt : vector<16xf16>
+      vector.store %pk_kd0_pt, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+      %pk_vq0_pt = vector.load %pk_vc_pt[%kv, %km_dim0] : view<8x128xi8> -> vector<16xi8>
+      %pk_vs16_0_pt = view.load %pk_vs_pt[%kv, %km_bb0] : view<8x4xf16> -> f16
+      %pk_vh0_pt = vector.sitofp %pk_vq0_pt : vector<16xi8> to vector<16xf16>
+      %pk_vsp0_pt = vector.splat %pk_vs16_0_pt : vector<16xf16>
+      %pk_vd0_pt = vector.mulf %pk_vh0_pt, %pk_vsp0_pt : vector<16xf16>
+      scf.for %pk_j0_pt = [%c0 to %cdpt step %c1] unroll {
+        %pk_vj0_pt = vector.extract %pk_vd0_pt[%pk_j0_pt] : vector<16xf16> -> f16
+        %pk_vr0_pt = index.add %km_dim0, %pk_j0_pt : index
+        %pk_vrb0_pt = index.assume %pk_vr0_pt [range(%pk_vr0_pt, 0, 127)] : index
+        view.store %pk_vj0_pt, %vt_view[%pk_vrb0_pt, %lane] : f16, view<128x40xf16>
       }
-      vector.store %kvals_p2_pt, %k_view[%st_key_p2, %st_dim_p2] : vector<16xf16>, view<32x136xf16>
-      scf.for %j_p2_pt = [%c0 to %cdpt step %c1] unroll {
-        %vj_p2_pt = vector.extract %vvals_p2_pt[%j_p2_pt] : vector<16xf16> -> f16
-        %vt_row_val_p2_pt = index.add %st_dim_p2, %j_p2_pt : index
-        %vt_row_p2_pt = index.assume %vt_row_val_p2_pt [range(%vt_row_val_p2_pt, 0, 127)] : index
-        view.store %vj_p2_pt, %vt_view[%vt_row_p2_pt, %st_key_p2] : f16, view<128x40xf16>
+      %pk_kq1_pt = vector.load %pk_kc_pt[%kv, %km_dim1] : view<8x128xi8> -> vector<16xi8>
+      %pk_ks16_1_pt = view.load %pk_ks_pt[%kv, %km_bb1] : view<8x4xf16> -> f16
+      %pk_kh1_pt = vector.sitofp %pk_kq1_pt : vector<16xi8> to vector<16xf16>
+      %pk_ksp1_pt = vector.splat %pk_ks16_1_pt : vector<16xf16>
+      %pk_kd1_pt = vector.mulf %pk_kh1_pt, %pk_ksp1_pt : vector<16xf16>
+      vector.store %pk_kd1_pt, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+      %pk_vq1_pt = vector.load %pk_vc_pt[%kv, %km_dim1] : view<8x128xi8> -> vector<16xi8>
+      %pk_vs16_1_pt = view.load %pk_vs_pt[%kv, %km_bb1] : view<8x4xf16> -> f16
+      %pk_vh1_pt = vector.sitofp %pk_vq1_pt : vector<16xi8> to vector<16xf16>
+      %pk_vsp1_pt = vector.splat %pk_vs16_1_pt : vector<16xf16>
+      %pk_vd1_pt = vector.mulf %pk_vh1_pt, %pk_vsp1_pt : vector<16xf16>
+      scf.for %pk_j1_pt = [%c0 to %cdpt step %c1] unroll {
+        %pk_vj1_pt = vector.extract %pk_vd1_pt[%pk_j1_pt] : vector<16xf16> -> f16
+        %pk_vr1_pt = index.add %km_dim1, %pk_j1_pt : index
+        %pk_vrb1_pt = index.assume %pk_vr1_pt [range(%pk_vr1_pt, 0, 127)] : index
+        view.store %pk_vj1_pt, %vt_view[%pk_vrb1_pt, %lane] : f16, view<128x40xf16>
+      }
+      scf.if %km_live2 {
+        %pk_kq2_pt = vector.load %pk_kc_pt[%kv, %km_dim2] : view<8x128xi8> -> vector<16xi8>
+        %pk_ks16_2_pt = view.load %pk_ks_pt[%kv, %km_bb2] : view<8x4xf16> -> f16
+        %pk_kh2_pt = vector.sitofp %pk_kq2_pt : vector<16xi8> to vector<16xf16>
+        %pk_ksp2_pt = vector.splat %pk_ks16_2_pt : vector<16xf16>
+        %pk_kd2_pt = vector.mulf %pk_kh2_pt, %pk_ksp2_pt : vector<16xf16>
+        vector.store %pk_kd2_pt, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+        %pk_vq2_pt = vector.load %pk_vc_pt[%kv, %km_dim2] : view<8x128xi8> -> vector<16xi8>
+        %pk_vs16_2_pt = view.load %pk_vs_pt[%kv, %km_bb2] : view<8x4xf16> -> f16
+        %pk_vh2_pt = vector.sitofp %pk_vq2_pt : vector<16xi8> to vector<16xf16>
+        %pk_vsp2_pt = vector.splat %pk_vs16_2_pt : vector<16xf16>
+        %pk_vd2_pt = vector.mulf %pk_vh2_pt, %pk_vsp2_pt : vector<16xf16>
+        scf.for %pk_j2_pt = [%c0 to %cdpt step %c1] unroll {
+          %pk_vj2_pt = vector.extract %pk_vd2_pt[%pk_j2_pt] : vector<16xf16> -> f16
+          %pk_vr2_pt = index.add %km_dim2, %pk_j2_pt : index
+          %pk_vrb2_pt = index.assume %pk_vr2_pt [range(%pk_vr2_pt, 0, 127)] : index
+          view.store %pk_vj2_pt, %vt_view[%pk_vrb2_pt, %lane] : f16, view<128x40xf16>
+        }
+      }
+    } else {
+      vector.store %kz, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+      vector.store %kz, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+      scf.for %pk_jz0_pt = [%c0 to %cdpt step %c1] unroll {
+        %pk_z0_pt = index.add %km_dim0, %pk_jz0_pt : index
+        %pk_zb0_pt = index.assume %pk_z0_pt [range(%pk_z0_pt, 0, 127)] : index
+        view.store %km_zh, %vt_view[%pk_zb0_pt, %lane] : f16, view<128x40xf16>
+        %pk_z1_pt = index.add %km_dim1, %pk_jz0_pt : index
+        %pk_zb1_pt = index.assume %pk_z1_pt [range(%pk_z1_pt, 0, 127)] : index
+        view.store %km_zh, %vt_view[%pk_zb1_pt, %lane] : f16, view<128x40xf16>
+      }
+      scf.if %km_live2 {
+        vector.store %kz, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+        scf.for %pk_jz2_pt = [%c0 to %cdpt step %c1] unroll {
+          %pk_z2_pt = index.add %km_dim2, %pk_jz2_pt : index
+          %pk_zb2_pt = index.assume %pk_z2_pt [range(%pk_z2_pt, 0, 127)] : index
+          view.store %km_zh, %vt_view[%pk_zb2_pt, %lane] : f16, view<128x40xf16>
+        }
       }
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -36451,111 +36414,117 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_swa_rdna4") @g_ink_atte
   %st_seg_p2 = index.rem %st_slot_cl_p2, %ctpk : index
   %st_dim_val_p2 = index.mul %st_seg_p2, %cdpt : index
   %st_dim_p2 = index.assume %st_dim_val_p2 [range(%st_dim_val_p2, 0, 112)] : index
+  %km_zh = scalar.constant 0.0 : f16
+  %km_wu_i = index.cast %wave : index to i32
+  %km_wu_b = kernel.subgroup.broadcast %km_wu_i from %c0_i32 : i32, i32
+  %km_wu = index.cast %km_wu_b : i32 to index
+  %km_d0_v = index.mul %km_wu, %c16 : index
+  %km_dim0 = index.assume %km_d0_v [range(%km_d0_v, 0, 112)] : index
+  %km_c48 = index.constant 48 : index
+  %km_d1_v = index.add %km_dim0, %km_c48 : index
+  %km_dim1 = index.assume %km_d1_v [range(%km_d1_v, 0, 112)] : index
+  %km_live2 = index.cmp ult, %km_wu, %c2 : index
+  %km_w2 = index.min %km_wu, %c1 : index
+  %km_d2_a = index.mul %km_w2, %c16 : index
+  %km_c96 = index.constant 96 : index
+  %km_d2_v = index.add %km_d2_a, %km_c96 : index
+  %km_dim2 = index.assume %km_d2_v [range(%km_d2_v, 0, 112)] : index
   %kt_hot = index.sub %key_tiles, %c1 : index
   %m_hot, %l_hot, %o0_hot, %o1_hot, %o2_hot, %o3_hot, %o4_hot, %o5_hot, %o6_hot, %o7_hot = scf.for %kt = [%c0 to %kt_hot step %c1](%m = %m_init : f32, %l = %one_init : f32, %a0 = %init : vector<8xf32>, %a1 = %init : vector<8xf32>, %a2 = %init : vector<8xf32>, %a3 = %init : vector<8xf32>, %a4 = %init : vector<8xf32>, %a5 = %init : vector<8xf32>, %a6 = %init : vector<8xf32>, %a7 = %init : vector<8xf32>) -> (f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>) {
     %tile_first = index.madd %kt, %ckt, %key_low : index
-    %key_pos_p0 = index.add %tile_first, %st_key_p0 : index
-    %key_valid_p0 = index.cmp ule, %key_pos_p0, %pos_last : index
-    %kvals_p0, %vvals_p0 = scf.if %key_valid_p0 -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p0 = index.assume %key_pos_p0 [range(%key_pos_p0, 0, 1048575)] : index
-      %in_cur_p0 = index.cmp uge, %kp_p0, %sp_start : index
-      %k_r_p0, %v_r_p0 = scf.if %in_cur_p0 -> (vector<16xf16>, vector<16xf16>) {
-        %rel_p0 = index.sub %kp_p0, %sp_start : index
-        %tk_v_p0 = index.add %sp_first, %rel_p0 : index
-        %tk_p0 = index.assume %tk_v_p0 [range(%tk_v_p0, 0, 8191), lt(%tk_v_p0, %tokens)] : index
-        %kh_c_p0 = vector.load %swa_cur_v[%tk_p0, %c0, %kv, %st_dim_p0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        %vh_c_p0 = vector.load %swa_cur_v[%tk_p0, %c1, %kv, %st_dim_p0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        scf.yield %kh_c_p0, %vh_c_p0 : vector<16xf16>, vector<16xf16>
-      } else {
-        %rp_p0 = index.rem %kp_p0, %cWIN_mod : index
-        %rp_off_p0 = index.scale %rp_p0, %pos_bytes : index, offset -> offset
-        %ko_p0 = index.add %ring_rd, %rp_off_p0 : offset
-        %vo_p0 = index.add %ko_p0, %ring_v_stride : offset
-        %kc_p0 = buffer.view %arena[%ko_p0] : buffer -> view<8x128xf16>
-        %vc_p0 = buffer.view %arena[%vo_p0] : buffer -> view<8x128xf16>
-        %kh_o_p0 = vector.load %kc_p0[%kv, %st_dim_p0] : view<8x128xf16> -> vector<16xf16>
-        %vh_o_p0 = vector.load %vc_p0[%kv, %st_dim_p0] : view<8x128xf16> -> vector<16xf16>
-        scf.yield %kh_o_p0, %vh_o_p0 : vector<16xf16>, vector<16xf16>
-      }
-      scf.yield %k_r_p0, %v_r_p0 : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p0, %k_view[%st_key_p0, %st_dim_p0] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p0 = [%c0 to %cdpt step %c1] unroll {
-      %vj_p0 = vector.extract %vvals_p0[%j_p0] : vector<16xf16> -> f16
-      %vt_row_val_p0 = index.add %st_dim_p0, %j_p0 : index
-      %vt_row_p0 = index.assume %vt_row_val_p0 [range(%vt_row_val_p0, 0, 127)] : index
-      view.store %vj_p0, %vt_view[%vt_row_p0, %st_key_p0] : f16, view<128x40xf16>
-    }
-    %key_pos_p1 = index.add %tile_first, %st_key_p1 : index
-    %key_valid_p1 = index.cmp ule, %key_pos_p1, %pos_last : index
-    %kvals_p1, %vvals_p1 = scf.if %key_valid_p1 -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p1 = index.assume %key_pos_p1 [range(%key_pos_p1, 0, 1048575)] : index
-      %in_cur_p1 = index.cmp uge, %kp_p1, %sp_start : index
-      %k_r_p1, %v_r_p1 = scf.if %in_cur_p1 -> (vector<16xf16>, vector<16xf16>) {
-        %rel_p1 = index.sub %kp_p1, %sp_start : index
-        %tk_v_p1 = index.add %sp_first, %rel_p1 : index
-        %tk_p1 = index.assume %tk_v_p1 [range(%tk_v_p1, 0, 8191), lt(%tk_v_p1, %tokens)] : index
-        %kh_c_p1 = vector.load %swa_cur_v[%tk_p1, %c0, %kv, %st_dim_p1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        %vh_c_p1 = vector.load %swa_cur_v[%tk_p1, %c1, %kv, %st_dim_p1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        scf.yield %kh_c_p1, %vh_c_p1 : vector<16xf16>, vector<16xf16>
-      } else {
-        %rp_p1 = index.rem %kp_p1, %cWIN_mod : index
-        %rp_off_p1 = index.scale %rp_p1, %pos_bytes : index, offset -> offset
-        %ko_p1 = index.add %ring_rd, %rp_off_p1 : offset
-        %vo_p1 = index.add %ko_p1, %ring_v_stride : offset
-        %kc_p1 = buffer.view %arena[%ko_p1] : buffer -> view<8x128xf16>
-        %vc_p1 = buffer.view %arena[%vo_p1] : buffer -> view<8x128xf16>
-        %kh_o_p1 = vector.load %kc_p1[%kv, %st_dim_p1] : view<8x128xf16> -> vector<16xf16>
-        %vh_o_p1 = vector.load %vc_p1[%kv, %st_dim_p1] : view<8x128xf16> -> vector<16xf16>
-        scf.yield %kh_o_p1, %vh_o_p1 : vector<16xf16>, vector<16xf16>
-      }
-      scf.yield %k_r_p1, %v_r_p1 : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p1, %k_view[%st_key_p1, %st_dim_p1] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p1 = [%c0 to %cdpt step %c1] unroll {
-      %vj_p1 = vector.extract %vvals_p1[%j_p1] : vector<16xf16> -> f16
-      %vt_row_val_p1 = index.add %st_dim_p1, %j_p1 : index
-      %vt_row_p1 = index.assume %vt_row_val_p1 [range(%vt_row_val_p1, 0, 127)] : index
-      view.store %vj_p1, %vt_view[%vt_row_p1, %st_key_p1] : f16, view<128x40xf16>
-    }
-    scf.if %st_live_p2 {
-      %key_pos_p2 = index.add %tile_first, %st_key_p2 : index
-      %key_valid_p2 = index.cmp ule, %key_pos_p2, %pos_last : index
-      %kvals_p2, %vvals_p2 = scf.if %key_valid_p2 -> (vector<16xf16>, vector<16xf16>) {
-        %kp_p2 = index.assume %key_pos_p2 [range(%key_pos_p2, 0, 1048575)] : index
-        %in_cur_p2 = index.cmp uge, %kp_p2, %sp_start : index
-        %k_r_p2, %v_r_p2 = scf.if %in_cur_p2 -> (vector<16xf16>, vector<16xf16>) {
-          %rel_p2 = index.sub %kp_p2, %sp_start : index
-          %tk_v_p2 = index.add %sp_first, %rel_p2 : index
-          %tk_p2 = index.assume %tk_v_p2 [range(%tk_v_p2, 0, 8191), lt(%tk_v_p2, %tokens)] : index
-          %kh_c_p2 = vector.load %swa_cur_v[%tk_p2, %c0, %kv, %st_dim_p2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-          %vh_c_p2 = vector.load %swa_cur_v[%tk_p2, %c1, %kv, %st_dim_p2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-          scf.yield %kh_c_p2, %vh_c_p2 : vector<16xf16>, vector<16xf16>
-        } else {
-          %rp_p2 = index.rem %kp_p2, %cWIN_mod : index
-          %rp_off_p2 = index.scale %rp_p2, %pos_bytes : index, offset -> offset
-          %ko_p2 = index.add %ring_rd, %rp_off_p2 : offset
-          %vo_p2 = index.add %ko_p2, %ring_v_stride : offset
-          %kc_p2 = buffer.view %arena[%ko_p2] : buffer -> view<8x128xf16>
-          %vc_p2 = buffer.view %arena[%vo_p2] : buffer -> view<8x128xf16>
-          %kh_o_p2 = vector.load %kc_p2[%kv, %st_dim_p2] : view<8x128xf16> -> vector<16xf16>
-          %vh_o_p2 = vector.load %vc_p2[%kv, %st_dim_p2] : view<8x128xf16> -> vector<16xf16>
-          scf.yield %kh_o_p2, %vh_o_p2 : vector<16xf16>, vector<16xf16>
+    %km_kp = index.add %tile_first, %lane : index
+    %km_valid = index.cmp ule, %km_kp, %pos_last : index
+    scf.if %km_valid {
+      %km_kpb = index.assume %km_kp [range(%km_kp, 0, 1048575)] : index
+      %km_in = index.cmp uge, %km_kpb, %sp_start : index
+      scf.if %km_in {
+        %km_rel = index.sub %km_kpb, %sp_start : index
+        %km_tkv = index.add %sp_first, %km_rel : index
+        %km_tk = index.assume %km_tkv [range(%km_tkv, 0, 8191), lt(%km_tkv, %tokens)] : index
+        %km_kc0 = vector.load %swa_cur_v[%km_tk, %c0, %kv, %km_dim0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        %km_vc0 = vector.load %swa_cur_v[%km_tk, %c1, %kv, %km_dim0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        vector.store %km_kc0, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jc0 = [%c0 to %cdpt step %c1] unroll {
+          %km_vjc0 = vector.extract %km_vc0[%km_jc0] : vector<16xf16> -> f16
+          %km_vrc0 = index.add %km_dim0, %km_jc0 : index
+          %km_vrbc0 = index.assume %km_vrc0 [range(%km_vrc0, 0, 127)] : index
+          view.store %km_vjc0, %vt_view[%km_vrbc0, %lane] : f16, view<128x40xf16>
         }
-        scf.yield %k_r_p2, %v_r_p2 : vector<16xf16>, vector<16xf16>
+        %km_kc1 = vector.load %swa_cur_v[%km_tk, %c0, %kv, %km_dim1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        %km_vc1 = vector.load %swa_cur_v[%km_tk, %c1, %kv, %km_dim1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        vector.store %km_kc1, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jc1 = [%c0 to %cdpt step %c1] unroll {
+          %km_vjc1 = vector.extract %km_vc1[%km_jc1] : vector<16xf16> -> f16
+          %km_vrc1 = index.add %km_dim1, %km_jc1 : index
+          %km_vrbc1 = index.assume %km_vrc1 [range(%km_vrc1, 0, 127)] : index
+          view.store %km_vjc1, %vt_view[%km_vrbc1, %lane] : f16, view<128x40xf16>
+        }
+        scf.if %km_live2 {
+          %km_kc2 = vector.load %swa_cur_v[%km_tk, %c0, %kv, %km_dim2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+          %km_vc2 = vector.load %swa_cur_v[%km_tk, %c1, %kv, %km_dim2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+          vector.store %km_kc2, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+          scf.for %km_jc2 = [%c0 to %cdpt step %c1] unroll {
+            %km_vjc2 = vector.extract %km_vc2[%km_jc2] : vector<16xf16> -> f16
+            %km_vrc2 = index.add %km_dim2, %km_jc2 : index
+            %km_vrbc2 = index.assume %km_vrc2 [range(%km_vrc2, 0, 127)] : index
+            view.store %km_vjc2, %vt_view[%km_vrbc2, %lane] : f16, view<128x40xf16>
+          }
+        }
       } else {
-        scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
+        %km_rp = index.rem %km_kpb, %cWIN_mod : index
+        %km_rpo = index.scale %km_rp, %pos_bytes : index, offset -> offset
+        %km_ko = index.add %ring_rd, %km_rpo : offset
+        %km_vo = index.add %km_ko, %ring_v_stride : offset
+        %km_kv = buffer.view %arena[%km_ko] : buffer -> view<8x128xf16>
+        %km_vv = buffer.view %arena[%km_vo] : buffer -> view<8x128xf16>
+        %km_kr0 = vector.load %km_kv[%kv, %km_dim0] : view<8x128xf16> -> vector<16xf16>
+        %km_vr0 = vector.load %km_vv[%kv, %km_dim0] : view<8x128xf16> -> vector<16xf16>
+        vector.store %km_kr0, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jr0 = [%c0 to %cdpt step %c1] unroll {
+          %km_vjr0 = vector.extract %km_vr0[%km_jr0] : vector<16xf16> -> f16
+          %km_vrr0 = index.add %km_dim0, %km_jr0 : index
+          %km_vrbr0 = index.assume %km_vrr0 [range(%km_vrr0, 0, 127)] : index
+          view.store %km_vjr0, %vt_view[%km_vrbr0, %lane] : f16, view<128x40xf16>
+        }
+        %km_kr1 = vector.load %km_kv[%kv, %km_dim1] : view<8x128xf16> -> vector<16xf16>
+        %km_vr1 = vector.load %km_vv[%kv, %km_dim1] : view<8x128xf16> -> vector<16xf16>
+        vector.store %km_kr1, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jr1 = [%c0 to %cdpt step %c1] unroll {
+          %km_vjr1 = vector.extract %km_vr1[%km_jr1] : vector<16xf16> -> f16
+          %km_vrr1 = index.add %km_dim1, %km_jr1 : index
+          %km_vrbr1 = index.assume %km_vrr1 [range(%km_vrr1, 0, 127)] : index
+          view.store %km_vjr1, %vt_view[%km_vrbr1, %lane] : f16, view<128x40xf16>
+        }
+        scf.if %km_live2 {
+          %km_kr2 = vector.load %km_kv[%kv, %km_dim2] : view<8x128xf16> -> vector<16xf16>
+          %km_vr2 = vector.load %km_vv[%kv, %km_dim2] : view<8x128xf16> -> vector<16xf16>
+          vector.store %km_kr2, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+          scf.for %km_jr2 = [%c0 to %cdpt step %c1] unroll {
+            %km_vjr2 = vector.extract %km_vr2[%km_jr2] : vector<16xf16> -> f16
+            %km_vrr2 = index.add %km_dim2, %km_jr2 : index
+            %km_vrbr2 = index.assume %km_vrr2 [range(%km_vrr2, 0, 127)] : index
+            view.store %km_vjr2, %vt_view[%km_vrbr2, %lane] : f16, view<128x40xf16>
+          }
+        }
       }
-      vector.store %kvals_p2, %k_view[%st_key_p2, %st_dim_p2] : vector<16xf16>, view<32x136xf16>
-      scf.for %j_p2 = [%c0 to %cdpt step %c1] unroll {
-        %vj_p2 = vector.extract %vvals_p2[%j_p2] : vector<16xf16> -> f16
-        %vt_row_val_p2 = index.add %st_dim_p2, %j_p2 : index
-        %vt_row_p2 = index.assume %vt_row_val_p2 [range(%vt_row_val_p2, 0, 127)] : index
-        view.store %vj_p2, %vt_view[%vt_row_p2, %st_key_p2] : f16, view<128x40xf16>
+    } else {
+      vector.store %kz, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+      vector.store %kz, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+      scf.for %km_jz0 = [%c0 to %cdpt step %c1] unroll {
+        %km_z0 = index.add %km_dim0, %km_jz0 : index
+        %km_zb0 = index.assume %km_z0 [range(%km_z0, 0, 127)] : index
+        view.store %km_zh, %vt_view[%km_zb0, %lane] : f16, view<128x40xf16>
+        %km_z1 = index.add %km_dim1, %km_jz0 : index
+        %km_zb1 = index.assume %km_z1 [range(%km_z1, 0, 127)] : index
+        view.store %km_zh, %vt_view[%km_zb1, %lane] : f16, view<128x40xf16>
+      }
+      scf.if %km_live2 {
+        vector.store %kz, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jz2 = [%c0 to %cdpt step %c1] unroll {
+          %km_z2 = index.add %km_dim2, %km_jz2 : index
+          %km_zb2 = index.assume %km_z2 [range(%km_z2, 0, 127)] : index
+          view.store %km_zh, %vt_view[%km_zb2, %lane] : f16, view<128x40xf16>
+        }
       }
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
@@ -37207,108 +37176,99 @@ kernel.def target(@rdna4) export("g_ink_attention_flash2_swa_rdna4") @g_ink_atte
     scf.yield %m_new, %l_new, %on0, %on1, %on2, %on3, %on4, %on5, %on6, %on7 : f32, f32, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>, vector<8xf32>
   }
     %tile_first_pt = index.madd %kt_hot, %ckt, %key_low : index
-    %key_pos_p0_pt = index.add %tile_first_pt, %st_key_p0 : index
-    %key_valid_p0_pt = index.cmp ule, %key_pos_p0_pt, %pos_last : index
-    %kvals_p0_pt, %vvals_p0_pt = scf.if %key_valid_p0_pt -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p0_pt = index.assume %key_pos_p0_pt [range(%key_pos_p0_pt, 0, 1048575)] : index
-      %in_cur_p0_pt = index.cmp uge, %kp_p0_pt, %sp_start : index
-      %k_r_p0_pt, %v_r_p0_pt = scf.if %in_cur_p0_pt -> (vector<16xf16>, vector<16xf16>) {
-        %rel_p0_pt = index.sub %kp_p0_pt, %sp_start : index
-        %tk_v_p0_pt = index.add %sp_first, %rel_p0_pt : index
-        %tk_p0_pt = index.assume %tk_v_p0_pt [range(%tk_v_p0_pt, 0, 8191), lt(%tk_v_p0_pt, %tokens)] : index
-        %kh_c_p0_pt = vector.load %swa_cur_v[%tk_p0_pt, %c0, %kv, %st_dim_p0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        %vh_c_p0_pt = vector.load %swa_cur_v[%tk_p0_pt, %c1, %kv, %st_dim_p0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        scf.yield %kh_c_p0_pt, %vh_c_p0_pt : vector<16xf16>, vector<16xf16>
-      } else {
-        %rp_p0_pt = index.rem %kp_p0_pt, %cWIN_mod : index
-        %rp_off_p0_pt = index.scale %rp_p0_pt, %pos_bytes : index, offset -> offset
-        %ko_p0_pt = index.add %ring_rd, %rp_off_p0_pt : offset
-        %vo_p0_pt = index.add %ko_p0_pt, %ring_v_stride : offset
-        %kc_p0_pt = buffer.view %arena[%ko_p0_pt] : buffer -> view<8x128xf16>
-        %vc_p0_pt = buffer.view %arena[%vo_p0_pt] : buffer -> view<8x128xf16>
-        %kh_o_p0_pt = vector.load %kc_p0_pt[%kv, %st_dim_p0] : view<8x128xf16> -> vector<16xf16>
-        %vh_o_p0_pt = vector.load %vc_p0_pt[%kv, %st_dim_p0] : view<8x128xf16> -> vector<16xf16>
-        scf.yield %kh_o_p0_pt, %vh_o_p0_pt : vector<16xf16>, vector<16xf16>
-      }
-      scf.yield %k_r_p0_pt, %v_r_p0_pt : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p0_pt, %k_view[%st_key_p0, %st_dim_p0] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p0_pt = [%c0 to %cdpt step %c1] unroll {
-      %vj_p0_pt = vector.extract %vvals_p0_pt[%j_p0_pt] : vector<16xf16> -> f16
-      %vt_row_val_p0_pt = index.add %st_dim_p0, %j_p0_pt : index
-      %vt_row_p0_pt = index.assume %vt_row_val_p0_pt [range(%vt_row_val_p0_pt, 0, 127)] : index
-      view.store %vj_p0_pt, %vt_view[%vt_row_p0_pt, %st_key_p0] : f16, view<128x40xf16>
-    }
-    %key_pos_p1_pt = index.add %tile_first_pt, %st_key_p1 : index
-    %key_valid_p1_pt = index.cmp ule, %key_pos_p1_pt, %pos_last : index
-    %kvals_p1_pt, %vvals_p1_pt = scf.if %key_valid_p1_pt -> (vector<16xf16>, vector<16xf16>) {
-      %kp_p1_pt = index.assume %key_pos_p1_pt [range(%key_pos_p1_pt, 0, 1048575)] : index
-      %in_cur_p1_pt = index.cmp uge, %kp_p1_pt, %sp_start : index
-      %k_r_p1_pt, %v_r_p1_pt = scf.if %in_cur_p1_pt -> (vector<16xf16>, vector<16xf16>) {
-        %rel_p1_pt = index.sub %kp_p1_pt, %sp_start : index
-        %tk_v_p1_pt = index.add %sp_first, %rel_p1_pt : index
-        %tk_p1_pt = index.assume %tk_v_p1_pt [range(%tk_v_p1_pt, 0, 8191), lt(%tk_v_p1_pt, %tokens)] : index
-        %kh_c_p1_pt = vector.load %swa_cur_v[%tk_p1_pt, %c0, %kv, %st_dim_p1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        %vh_c_p1_pt = vector.load %swa_cur_v[%tk_p1_pt, %c1, %kv, %st_dim_p1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-        scf.yield %kh_c_p1_pt, %vh_c_p1_pt : vector<16xf16>, vector<16xf16>
-      } else {
-        %rp_p1_pt = index.rem %kp_p1_pt, %cWIN_mod : index
-        %rp_off_p1_pt = index.scale %rp_p1_pt, %pos_bytes : index, offset -> offset
-        %ko_p1_pt = index.add %ring_rd, %rp_off_p1_pt : offset
-        %vo_p1_pt = index.add %ko_p1_pt, %ring_v_stride : offset
-        %kc_p1_pt = buffer.view %arena[%ko_p1_pt] : buffer -> view<8x128xf16>
-        %vc_p1_pt = buffer.view %arena[%vo_p1_pt] : buffer -> view<8x128xf16>
-        %kh_o_p1_pt = vector.load %kc_p1_pt[%kv, %st_dim_p1] : view<8x128xf16> -> vector<16xf16>
-        %vh_o_p1_pt = vector.load %vc_p1_pt[%kv, %st_dim_p1] : view<8x128xf16> -> vector<16xf16>
-        scf.yield %kh_o_p1_pt, %vh_o_p1_pt : vector<16xf16>, vector<16xf16>
-      }
-      scf.yield %k_r_p1_pt, %v_r_p1_pt : vector<16xf16>, vector<16xf16>
-    } else {
-      scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
-    }
-    vector.store %kvals_p1_pt, %k_view[%st_key_p1, %st_dim_p1] : vector<16xf16>, view<32x136xf16>
-    scf.for %j_p1_pt = [%c0 to %cdpt step %c1] unroll {
-      %vj_p1_pt = vector.extract %vvals_p1_pt[%j_p1_pt] : vector<16xf16> -> f16
-      %vt_row_val_p1_pt = index.add %st_dim_p1, %j_p1_pt : index
-      %vt_row_p1_pt = index.assume %vt_row_val_p1_pt [range(%vt_row_val_p1_pt, 0, 127)] : index
-      view.store %vj_p1_pt, %vt_view[%vt_row_p1_pt, %st_key_p1] : f16, view<128x40xf16>
-    }
-    scf.if %st_live_p2 {
-      %key_pos_p2_pt = index.add %tile_first_pt, %st_key_p2 : index
-      %key_valid_p2_pt = index.cmp ule, %key_pos_p2_pt, %pos_last : index
-      %kvals_p2_pt, %vvals_p2_pt = scf.if %key_valid_p2_pt -> (vector<16xf16>, vector<16xf16>) {
-        %kp_p2_pt = index.assume %key_pos_p2_pt [range(%key_pos_p2_pt, 0, 1048575)] : index
-        %in_cur_p2_pt = index.cmp uge, %kp_p2_pt, %sp_start : index
-        %k_r_p2_pt, %v_r_p2_pt = scf.if %in_cur_p2_pt -> (vector<16xf16>, vector<16xf16>) {
-          %rel_p2_pt = index.sub %kp_p2_pt, %sp_start : index
-          %tk_v_p2_pt = index.add %sp_first, %rel_p2_pt : index
-          %tk_p2_pt = index.assume %tk_v_p2_pt [range(%tk_v_p2_pt, 0, 8191), lt(%tk_v_p2_pt, %tokens)] : index
-          %kh_c_p2_pt = vector.load %swa_cur_v[%tk_p2_pt, %c0, %kv, %st_dim_p2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-          %vh_c_p2_pt = vector.load %swa_cur_v[%tk_p2_pt, %c1, %kv, %st_dim_p2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
-          scf.yield %kh_c_p2_pt, %vh_c_p2_pt : vector<16xf16>, vector<16xf16>
-        } else {
-          %rp_p2_pt = index.rem %kp_p2_pt, %cWIN_mod : index
-          %rp_off_p2_pt = index.scale %rp_p2_pt, %pos_bytes : index, offset -> offset
-          %ko_p2_pt = index.add %ring_rd, %rp_off_p2_pt : offset
-          %vo_p2_pt = index.add %ko_p2_pt, %ring_v_stride : offset
-          %kc_p2_pt = buffer.view %arena[%ko_p2_pt] : buffer -> view<8x128xf16>
-          %vc_p2_pt = buffer.view %arena[%vo_p2_pt] : buffer -> view<8x128xf16>
-          %kh_o_p2_pt = vector.load %kc_p2_pt[%kv, %st_dim_p2] : view<8x128xf16> -> vector<16xf16>
-          %vh_o_p2_pt = vector.load %vc_p2_pt[%kv, %st_dim_p2] : view<8x128xf16> -> vector<16xf16>
-          scf.yield %kh_o_p2_pt, %vh_o_p2_pt : vector<16xf16>, vector<16xf16>
+    %km_kp_pt = index.add %tile_first_pt, %lane : index
+    %km_valid_pt = index.cmp ule, %km_kp_pt, %pos_last : index
+    scf.if %km_valid_pt {
+      %km_kpb_pt = index.assume %km_kp_pt [range(%km_kp_pt, 0, 1048575)] : index
+      %km_in_pt = index.cmp uge, %km_kpb_pt, %sp_start : index
+      scf.if %km_in_pt {
+        %km_rel_pt = index.sub %km_kpb_pt, %sp_start : index
+        %km_tkv_pt = index.add %sp_first, %km_rel_pt : index
+        %km_tk_pt = index.assume %km_tkv_pt [range(%km_tkv_pt, 0, 8191), lt(%km_tkv_pt, %tokens)] : index
+        %km_kc0_pt = vector.load %swa_cur_v[%km_tk_pt, %c0, %kv, %km_dim0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        %km_vc0_pt = vector.load %swa_cur_v[%km_tk_pt, %c1, %kv, %km_dim0] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        vector.store %km_kc0_pt, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jc0_pt = [%c0 to %cdpt step %c1] unroll {
+          %km_vjc0_pt = vector.extract %km_vc0_pt[%km_jc0_pt] : vector<16xf16> -> f16
+          %km_vrc0_pt = index.add %km_dim0, %km_jc0_pt : index
+          %km_vrbc0_pt = index.assume %km_vrc0_pt [range(%km_vrc0_pt, 0, 127)] : index
+          view.store %km_vjc0_pt, %vt_view[%km_vrbc0_pt, %lane] : f16, view<128x40xf16>
         }
-        scf.yield %k_r_p2_pt, %v_r_p2_pt : vector<16xf16>, vector<16xf16>
+        %km_kc1_pt = vector.load %swa_cur_v[%km_tk_pt, %c0, %kv, %km_dim1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        %km_vc1_pt = vector.load %swa_cur_v[%km_tk_pt, %c1, %kv, %km_dim1] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+        vector.store %km_kc1_pt, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jc1_pt = [%c0 to %cdpt step %c1] unroll {
+          %km_vjc1_pt = vector.extract %km_vc1_pt[%km_jc1_pt] : vector<16xf16> -> f16
+          %km_vrc1_pt = index.add %km_dim1, %km_jc1_pt : index
+          %km_vrbc1_pt = index.assume %km_vrc1_pt [range(%km_vrc1_pt, 0, 127)] : index
+          view.store %km_vjc1_pt, %vt_view[%km_vrbc1_pt, %lane] : f16, view<128x40xf16>
+        }
+        scf.if %km_live2 {
+          %km_kc2_pt = vector.load %swa_cur_v[%km_tk_pt, %c0, %kv, %km_dim2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+          %km_vc2_pt = vector.load %swa_cur_v[%km_tk_pt, %c1, %kv, %km_dim2] : view<[%tokens]x2x8x128xf16> -> vector<16xf16>
+          vector.store %km_kc2_pt, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+          scf.for %km_jc2_pt = [%c0 to %cdpt step %c1] unroll {
+            %km_vjc2_pt = vector.extract %km_vc2_pt[%km_jc2_pt] : vector<16xf16> -> f16
+            %km_vrc2_pt = index.add %km_dim2, %km_jc2_pt : index
+            %km_vrbc2_pt = index.assume %km_vrc2_pt [range(%km_vrc2_pt, 0, 127)] : index
+            view.store %km_vjc2_pt, %vt_view[%km_vrbc2_pt, %lane] : f16, view<128x40xf16>
+          }
+        }
       } else {
-        scf.yield %kz, %kz : vector<16xf16>, vector<16xf16>
+        %km_rp_pt = index.rem %km_kpb_pt, %cWIN_mod : index
+        %km_rpo_pt = index.scale %km_rp_pt, %pos_bytes : index, offset -> offset
+        %km_ko_pt = index.add %ring_rd, %km_rpo_pt : offset
+        %km_vo_pt = index.add %km_ko_pt, %ring_v_stride : offset
+        %km_kv_pt = buffer.view %arena[%km_ko_pt] : buffer -> view<8x128xf16>
+        %km_vv_pt = buffer.view %arena[%km_vo_pt] : buffer -> view<8x128xf16>
+        %km_kr0_pt = vector.load %km_kv_pt[%kv, %km_dim0] : view<8x128xf16> -> vector<16xf16>
+        %km_vr0_pt = vector.load %km_vv_pt[%kv, %km_dim0] : view<8x128xf16> -> vector<16xf16>
+        vector.store %km_kr0_pt, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jr0_pt = [%c0 to %cdpt step %c1] unroll {
+          %km_vjr0_pt = vector.extract %km_vr0_pt[%km_jr0_pt] : vector<16xf16> -> f16
+          %km_vrr0_pt = index.add %km_dim0, %km_jr0_pt : index
+          %km_vrbr0_pt = index.assume %km_vrr0_pt [range(%km_vrr0_pt, 0, 127)] : index
+          view.store %km_vjr0_pt, %vt_view[%km_vrbr0_pt, %lane] : f16, view<128x40xf16>
+        }
+        %km_kr1_pt = vector.load %km_kv_pt[%kv, %km_dim1] : view<8x128xf16> -> vector<16xf16>
+        %km_vr1_pt = vector.load %km_vv_pt[%kv, %km_dim1] : view<8x128xf16> -> vector<16xf16>
+        vector.store %km_kr1_pt, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jr1_pt = [%c0 to %cdpt step %c1] unroll {
+          %km_vjr1_pt = vector.extract %km_vr1_pt[%km_jr1_pt] : vector<16xf16> -> f16
+          %km_vrr1_pt = index.add %km_dim1, %km_jr1_pt : index
+          %km_vrbr1_pt = index.assume %km_vrr1_pt [range(%km_vrr1_pt, 0, 127)] : index
+          view.store %km_vjr1_pt, %vt_view[%km_vrbr1_pt, %lane] : f16, view<128x40xf16>
+        }
+        scf.if %km_live2 {
+          %km_kr2_pt = vector.load %km_kv_pt[%kv, %km_dim2] : view<8x128xf16> -> vector<16xf16>
+          %km_vr2_pt = vector.load %km_vv_pt[%kv, %km_dim2] : view<8x128xf16> -> vector<16xf16>
+          vector.store %km_kr2_pt, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+          scf.for %km_jr2_pt = [%c0 to %cdpt step %c1] unroll {
+            %km_vjr2_pt = vector.extract %km_vr2_pt[%km_jr2_pt] : vector<16xf16> -> f16
+            %km_vrr2_pt = index.add %km_dim2, %km_jr2_pt : index
+            %km_vrbr2_pt = index.assume %km_vrr2_pt [range(%km_vrr2_pt, 0, 127)] : index
+            view.store %km_vjr2_pt, %vt_view[%km_vrbr2_pt, %lane] : f16, view<128x40xf16>
+          }
+        }
       }
-      vector.store %kvals_p2_pt, %k_view[%st_key_p2, %st_dim_p2] : vector<16xf16>, view<32x136xf16>
-      scf.for %j_p2_pt = [%c0 to %cdpt step %c1] unroll {
-        %vj_p2_pt = vector.extract %vvals_p2_pt[%j_p2_pt] : vector<16xf16> -> f16
-        %vt_row_val_p2_pt = index.add %st_dim_p2, %j_p2_pt : index
-        %vt_row_p2_pt = index.assume %vt_row_val_p2_pt [range(%vt_row_val_p2_pt, 0, 127)] : index
-        view.store %vj_p2_pt, %vt_view[%vt_row_p2_pt, %st_key_p2] : f16, view<128x40xf16>
+    } else {
+      vector.store %kz, %k_view[%lane, %km_dim0] : vector<16xf16>, view<32x136xf16>
+      vector.store %kz, %k_view[%lane, %km_dim1] : vector<16xf16>, view<32x136xf16>
+      scf.for %km_jz0_pt = [%c0 to %cdpt step %c1] unroll {
+        %km_z0_pt = index.add %km_dim0, %km_jz0_pt : index
+        %km_zb0_pt = index.assume %km_z0_pt [range(%km_z0_pt, 0, 127)] : index
+        view.store %km_zh, %vt_view[%km_zb0_pt, %lane] : f16, view<128x40xf16>
+        %km_z1_pt = index.add %km_dim1, %km_jz0_pt : index
+        %km_zb1_pt = index.assume %km_z1_pt [range(%km_z1_pt, 0, 127)] : index
+        view.store %km_zh, %vt_view[%km_zb1_pt, %lane] : f16, view<128x40xf16>
+      }
+      scf.if %km_live2 {
+        vector.store %kz, %k_view[%lane, %km_dim2] : vector<16xf16>, view<32x136xf16>
+        scf.for %km_jz2_pt = [%c0 to %cdpt step %c1] unroll {
+          %km_z2_pt = index.add %km_dim2, %km_jz2_pt : index
+          %km_zb2_pt = index.assume %km_z2_pt [range(%km_z2_pt, 0, 127)] : index
+          view.store %km_zh, %vt_view[%km_zb2_pt, %lane] : f16, view<128x40xf16>
+        }
       }
     }
     kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
