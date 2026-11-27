@@ -115,6 +115,7 @@ def check_kernel():
     prefill_prefetch = "%pf0_kp_raw" in flash
     fused_norm_q8 = 'kernel.def export("g_ink_rms_norm_plane_q8x")' in t
     moe_f16_act = "%f16_out_lo = buffer.view %w_stage" in t
+    swa_v2 = 'kernel.def export("g_ink_attn_split_swa_span_v2")' in t
     regen = None
     if STOCK:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -128,13 +129,15 @@ def check_kernel():
                 subprocess.run([sys.executable, "-I", os.path.join(here, "gen_fuse_nq.py"), out, out], check=True, capture_output=True)
             if moe_f16_act:
                 subprocess.run([sys.executable, "-I", os.path.join(here, "gen_moe_f16_act.py"), out, out], check=True, capture_output=True)
+            if swa_v2:
+                subprocess.run([sys.executable, "-I", os.path.join(here, "gen_swa_v2.py"), out, out], check=True, capture_output=True)
             regen = open(out).read() == t
         finally:
             if os.path.exists(out):
                 os.remove(out)
     return report("kernel", has_v2 and one_wave and regen is not False, llm_sha256_16=sha, span_v2=has_v2, single_token_v2=one_wave,
                   prefill_4tile=prefill_4tile, prefill_prefetch=prefill_prefetch, fused_norm_q8=fused_norm_q8,
-                  moe_f16_act=moe_f16_act, regenerated_identically=regen)
+                  moe_f16_act=moe_f16_act, swa_v2=swa_v2, regenerated_identically=regen)
 
 
 def decode_tps(n_tokens, seed):
