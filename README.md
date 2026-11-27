@@ -12,7 +12,7 @@ A tuned [AMD Loom](https://github.com/ROCm/hrx-system) package for **Inkling-2-M
 | images | text only | **yes** (verified after 300K tokens of text) |
 | R9700 kernels | RDNA3 attention tiles | RDNA4 (gfx12) WMMA attention kernels |
 
-All numbers were measured on one R9700 (Ubuntu 26.04, hrx-loom 0.2.0) with the model pinned and `--memory_bytes=32256mib`.
+All numbers were measured on one R9700 (Ubuntu 26.04, hrx-loom 0.2.0; re-validated on 0.3.0, same results within ~3%) with the model pinned and `--memory_bytes=32256mib`.
 
 ## Requirements
 - AMD Radeon AI PRO R9700 (32 GB, gfx1201). It works best when the card is **not** driving your display
@@ -49,11 +49,125 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
    K/V position goes from 2048 to 1088 bytes. This applies to the 16 full-attention planes only; the 1024-token
    sliding-window ring and the DSpark drafter stay f16. Long prompts also prefill faster, because attention reads half the bytes.
 5. **Drafter**: DSpark speculative decoding at depth 3.
+6. **Decode attention v2** (`tools/gen_attn_split_v2.py SRC DST --span`): rewrites the single-token decode attention
+   `g_ink_attn_split` and adds `g_ink_attn_split_span_v2`. The new kernel is dispatched for pure-decode epochs, where every
+   span is one token (`t == spans`). Multi-token spans keep the stock span kernel. See below.
+7. **Fused RMS norm + q8 quantize** (`tools/gen_fuse_nq.py SRC DST`): the norm before attention and before the experts and the
+   q8 quantize that always follows it become one kernel, `g_ink_rms_norm_plane_q8x`. Bit-identical. See below.
 
 `bin/proxy.py` sits in front of Loom on :1234:
 - serves the `local` alias and `/props`
 - replaces images in older turns with a placeholder, so long conversations stay cacheable
 - frees the held conversation and retries once when Loom refuses an image turn for memory
+- optional **KV budget guard** (`LOOM_TOKEN_BUDGET`, off by default). It admits a chat only if all running chats' prompt + reply
+  reservation fit the budget; otherwise the chat waits in a FIFO queue (`LOOM_QUEUE_TIMEOUT`, default 1800 s). `GET /budget` shows usage.
+- **`prefix-diff` / `echo` diagnostics** (on; `LOOM_PREFIX_DIFF=0` turns them off). Loom continues a conversation from its idle row only
+  if the client re-sends the history exactly as generated. The proxy logs an earlier message that changed, an assistant turn whose content,
+  reasoning or tool calls differ from what the model generated, render-affecting settings that changed (reasoning_effort, tools, ...), a
+  changed system prompt, and image parts. Fields, lengths and flags only, never content.
+- **tool-argument restore** (on; `LOOM_ARG_RESTORE=0` turns it off): some agents re-serialize the tool-call arguments they send back (same
+  JSON value, different spacing/escaping), which breaks reuse on every turn. The proxy restores the exact generated string when the echoed
+  arguments parse to the same JSON. Values are never changed.
+- **tool-parameter alias** (on; `LOOM_PARAM_ALIAS=0` turns it off): see the `image_url` item under Known limits.
+- optional **vision offload** (`LOOM_VISION_OFFLOAD=1`): image parts are described by Loom's own vision in a side request (temperature 0,
+  cached by image hash) and sent as text, so image turns no longer force Loom 0.2.0 to re-read the whole conversation. The model then
+  works from the description instead of the pixels. Screenshot loop at 37K: follow-up turns 99.96% cached, ~0.2 s to first token.
+- proxy-only settings (KEY=VALUE lines) can live in `proxy.env` in the repo root (or `$LOOM_PROXY_ENV`). They are read at proxy
+  start, so `systemctl --user restart inkling-proxy` applies them without reloading Loom.
+- optional **system-prompt checkpoints** (`LOOM_SYS_CHECKPOINT=1` with `LOOM_CHECKPOINT_CAPACITY>0` and a card `checkpoint_capacity`).
+  New conversations reuse a shared long system prompt without Loom's prefix cache; see below.
+- optional **decode priority** (`LOOM_DECODE_PRIORITY=1`, needs the budget guard). While Loom reads a long cold prompt, every chat
+  that is replying drops to ~2 tok/s (see Known limits). This holds a request that needs at least `LOOM_DECODE_PRIORITY_MIN`
+  (8192) uncached tokens while another chat is mid-reply, for at most `LOOM_DECODE_PRIORITY_WAIT` (30) seconds. The uncached part
+  is estimated from the conversation's previous turn, and counted in full when the history no longer matches what was generated
+  or the previous reply hit `max_tokens`, so cached agent turns are not held. Measured: the replying chat stays at 89 tok/s
+  instead of 65 tok/s with 0.55 s stalls; the held 21K prompt gets its first token after 19 s instead of 6.5 s.
+
+### Decode attention v2
+The stock decode attention gives each of the 3 query heads of a KV head its own wave. Each lane holds 4 of the 128 dims and walks
+keys one at a time: per key and head, 4-byte K and V loads, two 2-byte scale loads, and a 32-lane reduction; the 3 waves load the
+same K/V. On the R9700 that reads the int8 KV cache at ~128 GB/s, so long-context decode is bound by memory-instruction issue.
+v2 uses one wave per KV head for all 3 query heads. Lane = 4 key slots x 8 dim chunks, with 16-byte K/V loads, an 8-lane
+xor reduction (the relative-position bias for keys within 1024 is folded in), and a per-slot online softmax merged at the end.
+Same arguments, grid, int8 dequant (f16 round trip kept) and partial layout, so `g_ink_attn_combine` is unchanged.
+
+Single-chat decode, drafter off (one R9700 with a 210 W cap that also drives a display; tok/s, 600-token replies):
+
+| context | stock | v2 |
+|--|--:|--:|
+| 8K | 84.1 | 88.3 |
+| 30K | 67.3 | 81.4 |
+| 60K | 52.4 | 73.5 |
+| 121K | 36.6 | 61.9 |
+
+KV read rises from ~128 to ~413 GB/s. With 4 chats decoding at ~60K each, combined throughput is ~+24%. Short-context decode
+(-0.6%), 4K/32K prefill and the prefill stall are unchanged within noise. **It is not bit-exact** (different float summation
+order). Greedy outputs matched the stock kernel on 2/2 long-context prompts (16K, 47K) and on 4/5 short prompts; the one
+divergence is at a near-tie inside reasoning. Needle retrieval passed at 133K and 260K, and with 2 x 260K + 45K concurrent.
+With the drafter on (the default profile), decode verifies 4-token spans, which still use the stock span kernel. Measured with
+the drafter on: 76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K. That is slower than drafter-off v2 beyond ~8K, so the
+concurrent profile turns the drafter off. (A lane-grouped multi-token span kernel was tried and gave no measurable gain.)
+
+### Prefill attention: 4 tiles per workgroup
+`g_ink_attention_flash2_ts2_rdna4` (gfx12 prefill attention, made by `tools/gen_flash2_multi.py --nsub 4 --key-major --uniform --prefetch`
+on top of v2).
+A stock workgroup covers 2 query tiles of 16 tokens x the 3 query heads of one KV head (6 waves), so each 32-key K/V tile it
+dequantizes into LDS serves only 32 queries. Now a workgroup covers 4 tiles (12 waves, 384 lanes): half the staging per query.
+The staging lanes are also reordered key-major. In the stock order, the transposed V stores of one wave land on V^T rows 16 dims
+apart, which all hit the same LDS bank. The next K/V tile's global loads are issued right after the barrier that publishes the
+current one, so they run during its MMAs (`--prefetch`), and the wave-uniform tile-ownership values are broadcast into scalar
+registers (`--uniform`), which pays for the prefetch registers. Per query nothing changes (same key tiles, same order, same
+online-softmax steps, same dequantized values), so the output is **bit-identical** (same tokens on the long, short and span
+equivalence sets). Compile report: 207 VGPRs (was 216), same occupancy (7 waves/SIMD), no spills.
+
+Time to first token, single cold prompt (same session, drafter off):
+
+| prompt | v2 only | 4 tiles + key-major | + prefetch + uniform (shipped) |
+|--|--:|--:|--:|
+| 8K | 2.05 s | 2.02 s | 2.03 s |
+| 32K | 8.53 s | 8.30 s | 8.25 s |
+| 64K | 20.0 s | 18.8 s | 18.6 s |
+| 130K | 52.4 s | 46.2 s | 45.3 s |
+| 255K | 149.7 s | 122.2 s | **118.5 s** |
+
+8 tiles per workgroup was slightly slower than 4 (255K: 130.6 s without key-major staging, against 129.7 s for 4). Prefetch alone
+needed 218 VGPRs (6 waves/SIMD) and gave 119.0 s; the broadcast brings it back to 7 waves.
+
+### Decode: fused RMS norm + q8 quantize
+At batch 1, decode spends a few ms per token in small per-layer kernels that move almost no data (norms, quantize, mixes) rather
+than in reading weights. A duplication profile (each kernel family launched twice) put the routed-expert matvecs at ~86% of the
+640 GB/s spec, the output head at ~574 GB/s, and the small latency-bound kernels at ~2.4 ms of a ~10.8 ms token. One of those is
+the q8 quantize that follows every RMS norm (96 per token): a separate kernel that re-reads the normalized row. The fused kernel
+keeps the stock norm and quantizes in registers: in its second loop each lane holds 4 values of one 32-value q8 group, the 8 lanes
+of a group combine the abs-max and integer sum with xor shuffles, and each lane quantizes its own 4 values with the stock
+arithmetic. Output is **bit-identical** (same tokens on the long, short and span equivalence sets). Single-chat decode, short
+context: **93.3 -> 95.5 tok/s (+2.4%)**; 4 chats 196.9 tok/s combined; prefill and the prefill stall unchanged.
+
+Fusing more neighbours (the mix before each norm, the expert combine with the following short conv and residual add) was also
+bit-identical but gave ~0.1% more, so it is not included: removing a kernel boundary saves only ~0.2 us here; what costs time is
+the work inside the small kernels.
+
+### Running several chats: `INKLING_PROFILE=concurrent`
+```bash
+INKLING_PROFILE=concurrent bin/inkling-r9700 start
+```
+This writes `model-concurrent.json` (rows 4, `max_sessions` 4, 262,144 context per chat, drafter off, prefix cache off,
+`checkpoint_capacity` 2) and starts the proxy with a 570,000-token budget (`INKLING_TOKEN_BUDGET`) and system-prompt checkpoints.
+In Loom 0.2.0, `rows` is only an initial capacity hint. Rows share one elastic KV pool, ~17.4 KB per context token with the
+drafter off (16 x 1088 B int8 KV) or ~21.5 KB with it. The budget was validated on a ~31 GB pool: 2 x 260K + 45K at once peaked
+at 29.4 GB. If you lower `INKLING_MEMORY`, lower the budget too. Turn-to-turn reuse comes from idle rows (~97-99.9% of the prompt
+cached on follow-up turns) as long as the client re-sends the history exactly as generated, including `reasoning_content`.
+*The launcher profile itself was checked offline only.* The same settings were validated in a different (Docker) launcher.
+
+### System-prompt checkpoints
+Loom's named checkpoints only fork when a request's history extends the pinned history exactly, and `reasoning_effort` and
+`tools` must match because the template renders them. So, the second time a new conversation arrives with the same system prompt,
+tools, tool_choice and reasoning_effort, the proxy runs a seed `[system, "Reply with only the word: ok"]`. Loom only pins a
+naturally finished reply. The proxy pins it, inserts the same 2-message seed after the system prompt of every new conversation with
+that key (and on their later turns), and sends `X-Loom-Checkpoint` on each conversation's first request. At most
+`LOOM_CHECKPOINT_CAPACITY` pins (LRU); pinned tokens come off the KV budget; a refused fork is retried plain.
+18K-token system prompt + tools: a new conversation takes ~0.9-1.8 s instead of ~5.2 s (18,423 tokens cached).
+**Trade-off: the model sees one extra short exchange after the system prompt.**
 
 `bin/loom-watchdog.sh` restarts and re-pins the model if Loom ever marks it failed.
 
@@ -61,7 +175,21 @@ GPU ordinals (`amdgpu://N`) are not stable across Loom tools, so the launcher se
 - **Turns that contain an image are not prefix-cached by Loom 0.2.0**: an image turn re-processes the whole conversation
   (~190 s at 300K tokens). Text turns after it are cached again, because the proxy swaps old images for a placeholder.
 - 512K loads, but it fills the card (32.4 GB) and was unreliable, so the card is set to 448K.
-- One conversation is served at a time (`rows: 1`).
+- One conversation is served at a time (`rows: 1`) in the default profile; see `INKLING_PROFILE=concurrent`.
+- **Loom 0.2.0 fails the whole model instead of rejecting a request** when live conversations overcommit the KV pool
+  ("model residency is waiting for capacity"). Streams then return empty HTTP 200 until a restart; `loom-watchdog.sh` restarts it.
+  Reproduced with 4 x ~101K concurrent prompts at 262K context per row and no admission control. Hence the proxy budget guard.
+- **Prefix-cache endpoints are never evicted** once `prefix_cache_capacity` is full, so later conversations get only the first
+  2048-token block. Each endpoint also holds recurrent state, and they block reclaim of idle histories: with 512 endpoints the
+  model failed after ~30. The concurrent profile turns the prefix cache off.
+- `continuation_epochs: 2` requires a nonzero `draft_depth` (startup fails with INVALID_ARGUMENT otherwise).
+- **A long prefill slows every replying chat to ~2 tok/s.** Each Loom submission carries up to `prefill_capacity` prompt tokens
+  plus one token per replying row, and a 2048-token chunk takes ~0.5 s. A chat replying at 91 tok/s gets 2.1 tok/s while a 25K
+  prompt is read (~7 s; ~2 minutes for 255K). `prefill_capacity` 1024 gives 3.5 tok/s for 6-10% slower prefill; the drafter
+  gives 3.2 tok/s. Optional decode priority in the proxy avoids it for cold prompts by holding them briefly.
+- **A tool parameter named `image_url` turns the whole request into a vision request** in loom-serve 0.2.0. There is then no
+  turn-to-turn reuse, and "trailing JSON input" 500s happen sometimes. Agents with a vision tool hit this on every turn. `bin/proxy.py` aliases
+  such parameters to `image_ref` and maps them back (`LOOM_PARAM_ALIAS=0` to disable). Measured with a 20-tool agent: 0% -> 99.9% reuse.
 - int8 KV is near-lossless in our tests (needle retrieval at 75K and 440K, same BetterBench speed). It is still a
   quantization of the attention cache. If you suspect it, compare against the f16 package.
 

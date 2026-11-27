@@ -76,6 +76,36 @@ func.decl @llm_storage(%maximum: i64, %span_capacity: i64, %context: i64, %pool:
 // Control state layout: [0, 8) unused, [8, 88) two transfer records,
 // [88, 128) layout recipe, [128, 640) stage per packing shape, then a 16-byte
 // sampling record per resident row.
+// dp:helper:begin
+func.def @dp_find_shape(%shapes: buffer, %count: index, %t_need: i64, %s_need: i64) -> (i32) {
+  %origin = index.constant 0 : offset
+  %c0 = index.constant 0 : index
+  %c1 = index.constant 1 : index
+  %c0_i32 = scalar.constant 0 : i32
+  %c1_i32 = scalar.constant 1 : i32
+  %shift16 = scalar.constant 16 : i64
+  %big = scalar.constant 9223372036854775807 : i64
+  %shape_view = buffer.view %shapes[%origin] : buffer -> view<[%count]x2xi64>
+  %best_tag, %best_cost = scf.for %i = [%c0 to %count step %c1](%acc_tag = %c0_i32 : i32, %acc_cost = %big : i64) -> (i32, i64) {
+    %t = view.load %shape_view[%i, 0] : view<[%count]x2xi64> -> i64
+    %s = view.load %shape_view[%i, 1] : view<[%count]x2xi64> -> i64
+    %tok_ok = scalar.cmpi uge, %t, %t_need : i64
+    %span_ok = scalar.cmpi uge, %s, %s_need : i64
+    %fits = scalar.andi %tok_ok, %span_ok : i1
+    %t_hi = scalar.shli %t, %shift16 : i64
+    %cost = scalar.ori %t_hi, %s : i64
+    %better = scalar.cmpi ult, %cost, %acc_cost : i64
+    %take = scalar.andi %fits, %better : i1
+    %i32_v = index.cast %i : index to i32
+    %tag1 = scalar.addi %i32_v, %c1_i32 : i32
+    %next_tag = scf.select %take, %tag1, %acc_tag : i32
+    %next_cost = scf.select %take, %cost, %acc_cost : i64
+    scf.yield %next_tag, %next_cost : i32, i64
+  }
+  func.return %best_tag : i32
+}
+// dp:helper:end
+
 func.def public @prepare(%prefill: i64, %context: i64, %pool: i64, %rows: i64, %pins: i64, %draft_depth: i32, %shapes: buffer, %shape_count: i64, %weights: buffer, %options: buffer) -> (i64, i32, buffer, buffer, buffer, buffer, buffer, buffer, buffer) {
   %c0_source = scalar.constant 0 : i32
   %origin = index.constant 0 : offset
@@ -290,6 +320,26 @@ func.def public @prepare(%prefill: i64, %context: i64, %pool: i64, %rows: i64, %
   %stage_count32 = index.cast %count : index to i32
   %drafting64 = scalar.extui %drafting : i1 to i64
   %allocations, %views, %origins, %draft, %geometry = func.call @llm_storage(%maximum, %span_capacity, %context, %pool, %rows, %pins, %drafting64) : (i64, i64, i64, i64, i64, i64, i64) -> (buffer, buffer, buffer, buffer, buffer)
+  // dp:table:begin
+  // Decode-priority stage lookup table at %state[1840..2020) (9x5xi32):
+  // tb in 0..8 -> t_need = 2 << tb in {2, 4, 8, 16, 32, 64, 128, 256, 512}
+  // sb in 0..4 -> s_need = 2 << sb in {2, 4, 8, 16, 32}
+  %dp_at = index.constant 1840 : offset
+  %dp_tbl = buffer.view %state[%dp_at] : buffer -> view<9x5xi32>
+  %dp_c9 = index.constant 9 : index
+  %dp_c5 = index.constant 5 : index
+  %dp_c2_64 = scalar.constant 2 : i64
+  scf.for %tb = [%c0 to %dp_c9 step %c1] {
+    %tb64 = index.cast %tb : index to i64
+    %t_need = scalar.shli %dp_c2_64, %tb64 : i64
+    scf.for %sb = [%c0 to %dp_c5 step %c1] {
+      %sb64 = index.cast %sb : index to i64
+      %s_need = scalar.shli %dp_c2_64, %sb64 : i64
+      %best = func.call @dp_find_shape(%shapes, %count, %t_need, %s_need) : (buffer, index, i64, i64) -> (i32)
+      view.store %best, %dp_tbl[%tb, %sb] : i32, view<9x5xi32>
+    }
+  }
+  // dp:table:end
   %terminal = global.load @terminal : buffer
   func.return %effective, %stage_count32, %state, %terminal, %allocations, %views, %origins, %draft, %geometry : i64, i32, buffer, buffer, buffer, buffer, buffer, buffer, buffer
 }
