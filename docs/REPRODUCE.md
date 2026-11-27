@@ -62,8 +62,8 @@ directory). You can also copy them yourself into `~/.local/share/inkling-r9700/m
 
 ## Path B: stock upstream, PR not merged
 
-You need five files from the fork branch:
-`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
+You need six files from the fork branch:
+`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
 
 **1. Kernel.** Generate it from your own `llm.loom` rather than copying ours, so it matches your package version:
 
@@ -71,11 +71,12 @@ You need five files from the fork branch:
 python3 -I tools/gen_attn_split_v2.py package/program/llm.loom /tmp/llm.v2.loom --span
 python3 -I tools/gen_flash2_multi.py /tmp/llm.v2.loom /tmp/llm.v2.loom --nsub 4 --key-major --uniform --prefetch   # optional: faster long prefill
 python3 -I tools/gen_fuse_nq.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                                 # optional: fused norm+q8 (+2.4% decode)
+python3 -I tools/gen_moe_f16_act.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                             # optional: direct f16 MoE act (+2-6% prefill, bit-identical)
 sha256sum package/program/llm.loom /tmp/llm.v2.loom
 ```
 
-From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), all three steps produce `cdb6a1894f000744`, the exact
-file on this branch (`54ae15610150b67e` without `gen_fuse_nq.py`, `9fcfa2f4f2c6b3d3` with decode v2 only). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
+From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), all four steps produce `7617edbcaa80e50f`, the exact
+file on this branch (`cdb6a1894f000744` without `gen_moe_f16_act.py`, `54ae15610150b67e` without the last two, `9fcfa2f4f2c6b3d3` with decode v2 only). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
 with an error otherwise. Install it with `cp /tmp/llm.v2.loom ~/.local/share/inkling-r9700/model/program/llm.loom`, then
 `bin/inkling-r9700 restart`. The first start compiles the changed kernels (seconds to a minute).
 
