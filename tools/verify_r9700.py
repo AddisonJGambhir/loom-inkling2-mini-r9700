@@ -119,6 +119,12 @@ def check_kernel():
     swa_v2 = 'kernel.def export("g_ink_attn_split_swa_span_v2")' in t
     small_decode = "// Coalesced controller apply:" in t
     moe_m128 = "// MoE grouped GEMM M=128 (" in t
+    prog_dir = os.path.dirname(os.path.abspath(LLM))
+    prep_path = os.path.join(prog_dir, "prepare.loom")
+    ctrl_path = os.path.join(prog_dir, "control.loom")
+    dp_prep = os.path.exists(prep_path) and "// dp:table:begin" in open(prep_path).read()
+    dp_ctrl = os.path.exists(ctrl_path) and ("// dp:encode:begin" in open(ctrl_path).read() and "// dp:publish:begin" in open(ctrl_path).read())
+    decode_priority = dp_prep and dp_ctrl
     regen = None
     if STOCK:
         here = os.path.dirname(os.path.abspath(__file__))
@@ -147,7 +153,7 @@ def check_kernel():
     return report("kernel", has_v2 and one_wave and regen is not False, llm_sha256_16=sha, span_v2=has_v2, single_token_v2=one_wave,
                   prefill_4tile=prefill_4tile, prefill_prefetch=prefill_prefetch, prefill_v3=prefill_v3,
                   fused_norm_q8=fused_norm_q8, moe_f16_act=moe_f16_act, swa_v2=swa_v2, small_decode=small_decode,
-                  moe_m128=moe_m128, regenerated_identically=regen)
+                  moe_m128=moe_m128, decode_priority=decode_priority, regenerated_identically=regen)
 
 
 def decode_tps(n_tokens, seed):
@@ -236,11 +242,60 @@ def check_vision():
                   follow_up_ttft_s=round(ttft2, 2), answer=m["content"][:120])
 
 
+def check_decode_priority():
+    """Verify engine-level mixed decode+prefill interleaving directly on BACKEND (bypassing proxy)."""
+    def stream_ts(prompt, max_tokens, chunks, marks, temp=1.0):
+        body = {"model": MODEL, "messages": [{"role": "user", "content": prompt}], "max_tokens": max_tokens,
+                "stream": True, "stream_options": {"include_usage": True}, "temperature": temp, "reasoning_effort": "none"}
+        req = urllib.request.Request(BACKEND + "/v1/chat/completions", json.dumps(body).encode(), {"Content-Type": "application/json"})
+        marks["start"] = time.monotonic()
+        with urllib.request.urlopen(req, timeout=300) as r:
+            for raw in r:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:") or line[5:].strip() == "[DONE]":
+                    continue
+                ev = json.loads(line[5:])
+                if ev.get("usage"):
+                    marks["usage"] = ev["usage"]
+                for ch in ev.get("choices") or []:
+                    d = ch.get("delta") or {}
+                    piece = (d.get("content") or "") + (d.get("reasoning_content") or d.get("reasoning") or "")
+                    if piece:
+                        now = time.monotonic()
+                        marks.setdefault("first", now)
+                        chunks.append((now, piece))
+        marks["end"] = time.monotonic()
+
+    def ntok(text):
+        return len(post(BACKEND, "/tokenize", {"model": MODEL, "content": text}).get("tokens") or []) if text else 0
+
+    rng = random.Random(int(time.time()))
+    doc = f"[dp-check-{time.time_ns()}] " + " ".join(rng.choice(W) for _ in range(18000)) + "\n\nReply: ok"
+    a_ch, a_m, b_m = [], {}, {}
+    ta = threading.Thread(target=stream_ts, args=(f"[{time.time_ns()}] Write a long detailed story about a lighthouse keeper.", 1200, a_ch, a_m))
+    ta.start()
+    while "first" not in a_m:
+        time.sleep(0.05)
+    time.sleep(2.0)
+    tb = threading.Thread(target=stream_ts, args=(doc, 1, [], b_m, 0.0))
+    tb.start(); tb.join(); ta.join()
+    b0, b1 = b_m["start"], b_m.get("first", b_m["end"])
+    during = "".join(p for t, p in a_ch if b0 <= t < b1)
+    a_tps = ntok(during) / max(b1 - b0, 1e-6)
+    ts = [a_m["first"]] + [t for t, _ in a_ch]
+    gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1) if ts[i + 1] >= b0 and ts[i] <= b1]
+    a_gap = max(gaps) if gaps else b1 - b0
+    return report("decode_priority", a_tps >= 12.0 and a_gap <= 0.35,
+                  a_tps_during=round(a_tps, 1), a_max_gap_s=round(a_gap, 3), b_ttft_s=round(b1 - b0, 2),
+                  b_prompt=(b_m.get("usage") or {}).get("prompt_tokens"),
+                  expect="stock ~2.4 tok/s & ~0.52s gap; PASS >= 12 tok/s & <= 0.35s gap")
+
+
 ok = True
 for c in CHECKS:
     try:
         ok &= {"kernel": check_kernel, "decode": check_decode, "reuse": check_reuse, "concurrency": check_concurrency,
-               "vision": check_vision}[c]()
+               "vision": check_vision, "decode_priority": check_decode_priority}[c]()
     except KeyError:
         sys.exit(f"unknown check {c!r}")
     except Exception as e:
