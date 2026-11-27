@@ -76,7 +76,8 @@ python3 -I tools/gen_swa_v2.py /tmp/llm.v2.loom /tmp/llm.v2.loom                
 python3 -I tools/gen_small_decode.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                            # optional: coalesced ctrl_apply + 1-barrier mix2..5/concat_rms (+1-2.4% decode)
 python3 -I tools/gen_prefill_attn_v3.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                         # optional: prefill attn v3 (f16 KV dequant + 2-page scalar lookup + SWA key-major, bit-identical)
 python3 -I tools/gen_moe_m128.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                                # optional: M=128 MoE bucketing + 128x128 NVFP4 grouped GEMMs (-6 to -9% prefill, bit-identical)
-sha256sum package/program/llm.loom /tmp/llm.v2.loom
+python3 -I tools/gen_decode_priority.py package/program/prepare.loom /tmp/prepare.dp.loom package/program/control.loom /tmp/control.dp.loom --cadence 5 --budget 512  # optional: engine-level decode priority (~9.5x concurrent decode tok/s, 0% solo overhead)
+sha256sum package/program/llm.loom /tmp/llm.v2.loom /tmp/prepare.dp.loom /tmp/control.dp.loom
 ```
 
 From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), all eight steps produce `f520392c7e425a7d`, the exact
@@ -99,14 +100,14 @@ In the model card, under `presets.chat.execution`:
 ```
 
 For the proxy process, set these environment variables:
-`LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=450000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=1`.
+`LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=520000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=0`.
 They can also go in `proxy.env`.
 
 ## Check it worked
 
 ```bash
 python3 -I tools/verify_r9700.py --proxy http://127.0.0.1:1234 kernel decode reuse            # ~3 minutes
-python3 -I tools/verify_r9700.py --proxy http://127.0.0.1:1234 concurrency                     # 4 chats at once
+python3 -I tools/verify_r9700.py --proxy http://127.0.0.1:1234 concurrency decode_priority    # 4 chats + concurrent stall check
 python3 -I tools/verify_r9700.py --proxy http://127.0.0.1:1234 --image some-screenshot.png vision   # needs LOOM_VISION_OFFLOAD=1
 ```
 
@@ -114,11 +115,12 @@ Each check prints one JSON line with `PASS`/`FAIL` and the numbers. Our results:
 
 | check | what it shows | ours |
 |--|--|--|
-| `kernel` | v2 kernels present; with `--stock FILE`, regenerated identically | PASS |
-| `decode` | tok/s at ~47K context / tok/s at ~6K (hardware-independent ratio) | 0.873 (stock ~0.68; pass >= 0.75) |
-| `reuse` | agent follow-up cached, with an `image_url` tool and re-serialized arguments | 99.9%, 0.11-0.17 s (stock proxy: FAIL) |
-| `concurrency` | 4 x ~24K chats all answer correctly; guard on | PASS, budget 570000 |
-| `vision` | follow-up after a screenshot turn | 99.9% cached, 0.3 s |
+| `kernel` | v2 kernels + decode priority present; with `--stock FILE`, regenerated identically | PASS |
+| `decode` | tok/s at ~47K context / tok/s at ~6K (hardware-independent ratio) | 0.866 (stock ~0.68; pass >= 0.75) |
+| `reuse` | agent follow-up cached, with an `image_url` tool and re-serialized arguments | 99.9%, 0.09 s (stock proxy: FAIL) |
+| `concurrency` | 4 x ~24K chats all answer correctly; guard on | PASS, budget 520000 |
+| `vision` | follow-up after a screenshot turn | 99.9% cached, 0.12 s |
+| `decode_priority` | active decode tok/s & max gap during a ~23K cold prefill (direct to backend) | 23.0 tok/s, 0.18 s gap (stock ~2.4 tok/s, ~0.52 s) |
 
 ## Make your agent cache-friendly
 

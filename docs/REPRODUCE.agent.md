@@ -46,7 +46,7 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 | A4 | go to Verify | | |
 
 ## Path B (stock upstream checkout, PR not merged)
-Fetch ten files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `tools/gen_swa_v2.py`, `tools/gen_small_decode.py`, `tools/gen_prefill_attn_v3.py`, `tools/gen_moe_m128.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
+Fetch eleven files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `tools/gen_swa_v2.py`, `tools/gen_small_decode.py`, `tools/gen_prefill_attn_v3.py`, `tools/gen_moe_m128.py`, `tools/gen_decode_priority.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
 | # | run | expect | on fail |
 |--|--|--|--|
 | B1 | `sha256sum package/program/llm.loom` | starts `4429a038eb9a30fb` (upstream 72294fb) or another stock hash | continue; B2 decides |
@@ -58,15 +58,16 @@ Fetch ten files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_f
 | B2f | `python3 -I tools/gen_small_decode.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (small decode kernels, recommended) | stderr mentions `g_ink_ctrl_apply` | `ValueError`: skip B2f and report |
 | B2g | `python3 -I tools/gen_prefill_attn_v3.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (prefill attn v3, recommended) | stderr mentions `rewrote flash2 v3` | `ValueError`: skip B2g and report |
 | B2h | `python3 -I tools/gen_moe_m128.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (M=128 MoE grouped GEMMs, recommended) | stdout mentions `rewrote MoE M=128` | `ValueError`: skip B2h and report |
+| B2i | `python3 -I tools/gen_decode_priority.py package/program/prepare.loom /tmp/prepare.dp.loom package/program/control.loom /tmp/control.dp.loom --cadence 5 --budget 512` (engine-level decode priority, recommended for C) | stdout mentions `cadence=5, budget=512`; `sha256sum` starts `92f006d509ae72c2` / `bfb90c42d52c6488` | `ValueError`: skip B2i and report |
 | B3 | `sha256sum /tmp/llm.v2.loom` | starts `f520392c7e425a7d` (`2610b880445ee38f` without B2h, `792ce64d808d823c` without B2g/B2h) when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
-| B4 | `cp package/program/llm.loom /tmp/llm.stock.loom && cp /tmp/llm.v2.loom package/program/llm.loom && cp package/program/llm.loom "$HOME_DIR/model/program/llm.loom"` | files copied | — |
+| B4 | `cp package/program/llm.loom /tmp/llm.stock.loom && cp /tmp/llm.v2.loom package/program/llm.loom && cp package/program/llm.loom "$HOME_DIR/model/program/llm.loom"` (and copy `/tmp/prepare.dp.loom`, `/tmp/control.dp.loom` into both `package/program/` and `$HOME_DIR/model/program/` if B2i ran) | files copied | — |
 | B5 | `cp bin/proxy.py /tmp/proxy.stock.py`, then put the fork's `bin/proxy.py` in place | — | — |
 | B6 | (C, optional) apply the card settings below to `"$HOME_DIR/model/model.json"` (or a copy passed to `--model`) and the proxy env vars to the proxy process | — | — |
 | B7 | `bin/inkling-r9700 restart` | `ready` | first start compiles changed kernels (<= 1 min); on `registration failed`, restore B4/B5 backups and report |
 
 Card settings for C (`presets.chat.execution`):
 `rows 4, max_sessions 4, context_capacity 262144, max_tokens 48000, draft_depth 0, prefix_cache_capacity 0, session_cache_capacity 0, cache_target_bytes 2147483648, checkpoint_capacity 2`.
-Proxy env for C: `LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=450000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=1`.
+Proxy env for C: `LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=520000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=0`.
 Budget rule: `17.2 GiB + 3.6 GiB + budget x 17.4 KB <= pool - 1.5 GB` (drafter off). Recompute if the pool (`--memory_bytes` / `INKLING_MEMORY`) is not ~31 GB.
 
 ## Optional V: vision offload (only with user consent, invariant 6)
@@ -81,8 +82,9 @@ Budget rule: `17.2 GiB + 3.6 GiB + budget x 17.4 KB <= pool - 1.5 GB` (drafter o
 | T1 | `python3 -I tools/verify_r9700.py --proxy $PROXY --backend $BACKEND kernel` (add `--stock /tmp/llm.stock.loom` on Path B) | `PASS`; `prefill_4tile: true` and `prefill_prefetch: true` (unless B2b was skipped); `regenerated_identically: true` with `--stock` |
 | T2 | `... decode` (~2 min, loads the GPU) | `PASS`, ratio >= 0.75 (reference 0.873; stock ~0.68) |
 | T3 | `... reuse` | `PASS`, pct >= 90 (reference 99.9, ttft ~0.1-0.2 s). The stock proxy fails this |
-| T4 | `... concurrency` (only with C) | `PASS`, `budget_guard: 570000` |
-| T5 | `... --image SCREENSHOT.png vision` (only with V) | `PASS`, follow-up pct >= 90 (reference 99.9, ~0.3 s) |
+| T4 | `... concurrency` (only with C) | `PASS`, `budget_guard: 520000` |
+| T5 | `... --image SCREENSHOT.png vision` (only with V) | `PASS`, follow-up pct >= 90 (reference 99.9, ~0.12-0.3 s) |
+| T6 | `... decode_priority` (only with B2i / C) | `PASS`, `a_tps_during >= 12` & `a_max_gap_s <= 0.35` (reference ~23 tok/s, ~0.18 s vs stock ~2.4 tok/s, ~0.52 s) |
 On a FAIL: rerun it once (sampling). If it fails again: T1 -> the kernel is not installed in `$HOME_DIR/model/program`; T2 -> wrong
 kernel or the drafter is on; T3 -> the proxy was not replaced, or the client path bypasses the proxy; T4 -> budget guard off, or
 too little memory (lower `LOOM_TOKEN_BUDGET`); T5 -> `LOOM_VISION_OFFLOAD` not loaded.
