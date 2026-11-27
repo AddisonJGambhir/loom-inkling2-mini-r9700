@@ -46,21 +46,22 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 | A4 | go to Verify | | |
 
 ## Path B (stock upstream checkout, PR not merged)
-Fetch four files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
+Fetch five files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
 | # | run | expect | on fail |
 |--|--|--|--|
 | B1 | `sha256sum package/program/llm.loom` | starts `4429a038eb9a30fb` (upstream 72294fb) or another stock hash | continue; B2 decides |
 | B2 | `python3 -I tools/gen_attn_split_v2.py package/program/llm.loom /tmp/llm.v2.loom --span` | stderr: `added g_ink_attn_split_span_v2 and patched 16 span call sites` | `ValueError`/`AssertionError`: the stock kernel changed upstream; stop and report (do not hand-edit) |
 | B2b | `python3 -I tools/gen_flash2_multi.py /tmp/llm.v2.loom /tmp/llm.v2.loom --nsub 4 --key-major --uniform --prefetch` (prefill kernel, recommended) | stderr: `rewrote g_ink_attention_flash2_ts2_rdna4: 4 query tiles per workgroup (384 lanes)` | `ValueError`: the stock prefill kernel changed; skip B2b and report |
-| B3 | `sha256sum /tmp/llm.v2.loom` | starts `54ae15610150b67e` (or `9fcfa2f4f2c6b3d3` without B2b) when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
+| B2c | `python3 -I tools/gen_fuse_nq.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (fused norm+q8, recommended) | stderr mentions `g_ink_rms_norm_plane_q8x` | `ValueError`: skip B2c and report |
+| B3 | `sha256sum /tmp/llm.v2.loom` | starts `cdb6a1894f000744` (`54ae15610150b67e` without B2c, `9fcfa2f4f2c6b3d3` without B2b/B2c) when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
 | B4 | `cp package/program/llm.loom /tmp/llm.stock.loom && cp /tmp/llm.v2.loom package/program/llm.loom && cp package/program/llm.loom "$HOME_DIR/model/program/llm.loom"` | files copied | — |
 | B5 | `cp bin/proxy.py /tmp/proxy.stock.py`, then put the fork's `bin/proxy.py` in place | — | — |
 | B6 | (C, optional) apply the card settings below to `"$HOME_DIR/model/model.json"` (or a copy passed to `--model`) and the proxy env vars to the proxy process | — | — |
 | B7 | `bin/inkling-r9700 restart` | `ready` | first start compiles changed kernels (<= 1 min); on `registration failed`, restore B4/B5 backups and report |
 
 Card settings for C (`presets.chat.execution`):
-`rows 4, max_sessions 4, context_capacity 262144, max_tokens 48000, draft_depth 0, prefix_cache_capacity 0, session_cache_capacity 2, cache_target_bytes 2147483648, checkpoint_capacity 2`.
-Proxy env for C: `LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=570000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1`.
+`rows 4, max_sessions 4, context_capacity 262144, max_tokens 48000, draft_depth 0, prefix_cache_capacity 0, session_cache_capacity 0, cache_target_bytes 2147483648, checkpoint_capacity 2`.
+Proxy env for C: `LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=450000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=1`.
 Budget rule: `17.2 GiB + 3.6 GiB + budget x 17.4 KB <= pool - 1.5 GB` (drafter off). Recompute if the pool (`--memory_bytes` / `INKLING_MEMORY`) is not ~31 GB.
 
 ## Optional V: vision offload (only with user consent, invariant 6)

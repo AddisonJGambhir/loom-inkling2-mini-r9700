@@ -36,9 +36,8 @@ The changes come in three independent parts. You can take any of them:
 - AMD Radeon AI PRO R9700 (gfx1201, 32 GB). Other gfx12 cards should work but are untested. The kernel is not target-specific, so
   RDNA3 cards would also get it, also untested.
 - Linux with the in-kernel `amdgpu` driver, Python >= 3.12, about 20 GB of disk.
-- **hrx-loom 0.2.0** (what the package installs) or **0.3.0**. All of this was also validated on 0.3.0 (`pip install "hrx-loom[hf]==0.3.0"`
-  in the package venv): every verify check passes, output is token-identical to 0.2.0 on our equivalence tests, and speed is the same
-  within ~2-3%.
+- **hrx-loom 0.3.0** (installed by default) or **0.2.0** (`INKLING_LOOM_VERSION=0.2.0`). Both are validated: every verify check passes,
+  output is token-identical on our equivalence tests, and speed is within ~2-3%. 0.3.0 also queues KV-pool overcommit instead of failing the model.
 
 ## Path A: the upstream PR is merged, or you use the fork branch
 
@@ -63,19 +62,20 @@ directory). You can also copy them yourself into `~/.local/share/inkling-r9700/m
 
 ## Path B: stock upstream, PR not merged
 
-You need four files from the fork branch:
-`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
+You need five files from the fork branch:
+`tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `bin/proxy.py` and (optional) `tools/verify_r9700.py`.
 
 **1. Kernel.** Generate it from your own `llm.loom` rather than copying ours, so it matches your package version:
 
 ```bash
-python3 -I gen_attn_split_v2.py package/program/llm.loom /tmp/llm.v2.loom --span
-python3 -I gen_flash2_multi.py /tmp/llm.v2.loom /tmp/llm.v2.loom --nsub 4 --key-major --uniform --prefetch   # optional: faster long prefill
+python3 -I tools/gen_attn_split_v2.py package/program/llm.loom /tmp/llm.v2.loom --span
+python3 -I tools/gen_flash2_multi.py /tmp/llm.v2.loom /tmp/llm.v2.loom --nsub 4 --key-major --uniform --prefetch   # optional: faster long prefill
+python3 -I tools/gen_fuse_nq.py /tmp/llm.v2.loom /tmp/llm.v2.loom                                                 # optional: fused norm+q8 (+2.4% decode)
 sha256sum package/program/llm.loom /tmp/llm.v2.loom
 ```
 
-From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), the result starts with `54ae15610150b67e`, the exact
-file in the PR (`9fcfa2f4f2c6b3d3` if you skip the second step). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
+From upstream commit `72294fb` (stock `sha256` starting `4429a038eb9a30fb`), all three steps produce `cdb6a1894f000744`, the exact
+file on this branch (`54ae15610150b67e` without `gen_fuse_nq.py`, `9fcfa2f4f2c6b3d3` with decode v2 only). If your stock file differs, the generator still works as long as the kernel it replaces is unchanged; it stops
 with an error otherwise. Install it with `cp /tmp/llm.v2.loom ~/.local/share/inkling-r9700/model/program/llm.loom`, then
 `bin/inkling-r9700 restart`. The first start compiles the changed kernels (seconds to a minute).
 
@@ -89,12 +89,12 @@ In the model card, under `presets.chat.execution`:
 
 ```json
 "rows": 4, "max_sessions": 4, "context_capacity": 262144, "max_tokens": 48000,
-"draft_depth": 0, "prefix_cache_capacity": 0, "session_cache_capacity": 2,
+"draft_depth": 0, "prefix_cache_capacity": 0, "session_cache_capacity": 0,
 "cache_target_bytes": 2147483648, "checkpoint_capacity": 2
 ```
 
 For the proxy process, set these environment variables:
-`LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=570000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1`.
+`LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=450000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=1`.
 They can also go in `proxy.env`.
 
 ## Check it worked
@@ -136,9 +136,10 @@ display, or you set `INKLING_MEMORY` lower, lower the budget too. With the draft
 
 ## Drafter
 
-With the drafter on, decode verifies 4-token spans through the span kernel, which v2 does not change. Drafter-on decode measured
-76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K, against 88 / 81 / 74 / 62 with the drafter off and v2. The drafter
-still helps short-context single-chat coding (+17-29%) but costs ~19% of the KV budget. The concurrent profile turns it off.
+With the drafter on, decode verifies 4-token spans through `g_ink_attn_split_span_v2` (added by `--span`). Earlier measurements
+with the stock span kernel gave 76.7 / 61.9 / 48.9 / 35.1 tok/s at 8K / 30K / 60K / 121K, against 88 / 81 / 74 / 62 with the
+drafter off and v2. The drafter still helps short-context single-chat coding (+17-29%) but costs ~19% of the KV budget. The
+concurrent profile turns it off.
 
 ## Loom behaviours to know about (0.2.0; 0.3.0 differences noted)
 

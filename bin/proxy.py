@@ -31,7 +31,12 @@ try:
 except FileNotFoundError:
     pass
 
-LISTEN, BACKEND, TAG = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+if len(sys.argv) >= 4:
+    LISTEN, BACKEND, TAG = int(sys.argv[1]), int(sys.argv[2]), sys.argv[3]
+elif __name__ == "__main__":
+    raise SystemExit("usage: proxy.py LISTEN_PORT BACKEND_PORT SERVED_TAG")
+else:
+    LISTEN, BACKEND, TAG = 0, 0, ""
 VISION = os.environ.get("LOOM_VISION") == "1"
 HOP = {"connection", "keep-alive", "transfer-encoding", "content-length", "proxy-connection", "upgrade", "te", "trailers"}
 
@@ -73,8 +78,8 @@ class LiveMeter:
 
     def _count_prompt(self, body):
         try:
-            j = json.loads(body)
-            if "image_url" in body.decode("utf-8", "ignore"):
+            j = json.loads(body) if isinstance(body, (bytes, bytearray, str)) else dict(body)
+            if _image_parts(j.get("messages")):
                 return                      # counting would run the image path; final line still reports it
             j.pop("stream", None); j.pop("stream_options", None)
             self.prompt = int(_post_backend("/v1/chat/completions/input_tokens", j).get("input_tokens") or 0) or None
@@ -164,6 +169,10 @@ class TokenBudget:
         with self.cv:
             self.used -= self.active.pop(t, 0); self.cv.notify_all()
 
+    def adjust_pinned(self, delta):
+        with self.cv:
+            self.pinned = max(0, self.pinned + delta); self.cv.notify_all()
+
     def status(self):
         with self.cv:
             return {"budget_tokens": self.budget, "pinned_tokens": self.pinned, "in_use_tokens": self.used, "active": len(self.active),
@@ -233,7 +242,7 @@ class DecodePriority:
 
     def start(self, stream, fresh):
         with self.cv:
-            self.seq += 1; self.live[self.seq] = {"stream": stream, "first": False, "t0": time.time(), "pre": fresh / 3500 + 0.5}
+            self.seq += 1; self.live[self.seq] = {"stream": stream, "first": False, "t0": time.time(), "pre": fresh / 2500 + 0.5}
             return self.seq
 
     def first(self, t):
@@ -496,6 +505,48 @@ class ParamAlias:
     def _rename(obj, mapping):
         return {mapping.get(k, k): v for k, v in obj.items()} if isinstance(obj, dict) else obj
 
+    @classmethod
+    def _rewrite_schema(cls, schema, ren):
+        """Recursively rename mapped keys in a JSON schema; return True if any key was renamed."""
+        if not isinstance(schema, dict):
+            return False
+        hit = False
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            local = {k: a for k, a in cls.MAP.items() if k in props and a not in props}
+            if local:
+                ren.update(local)
+                schema["properties"] = cls._rename(props, local)
+                if isinstance(schema.get("required"), list):
+                    schema["required"] = [local.get(x, x) for x in schema["required"]]
+                hit = True
+            for v in schema["properties"].values():
+                if cls._rewrite_schema(v, ren):
+                    hit = True
+        for subkey in ("items", "additionalProperties"):
+            if isinstance(schema.get(subkey), dict) and cls._rewrite_schema(schema[subkey], ren):
+                hit = True
+        for listkey in ("anyOf", "oneOf", "allOf", "prefixItems"):
+            if isinstance(schema.get(listkey), list):
+                for item in schema[listkey]:
+                    if cls._rewrite_schema(item, ren):
+                        hit = True
+        for defkey in ("$defs", "definitions"):
+            defs = schema.get(defkey)
+            if isinstance(defs, dict):
+                for v in defs.values():
+                    if cls._rewrite_schema(v, ren):
+                        hit = True
+        return hit
+
+    @classmethod
+    def _rename_deep(cls, obj, mapping):
+        if isinstance(obj, dict):
+            return {mapping.get(k, k): cls._rename_deep(v, mapping) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [cls._rename_deep(x, mapping) for x in obj]
+        return obj
+
     def rewrite_request(self, j):
         tools = j.get("tools")
         if not isinstance(tools, list):
@@ -504,14 +555,11 @@ class ParamAlias:
         for t in tools:
             fn = t.get("function") if isinstance(t, dict) else None
             params = fn.get("parameters") if isinstance(fn, dict) else None
-            props = params.get("properties") if isinstance(params, dict) else None
-            ren = ({k: a for k, a in self.MAP.items() if k in props and a not in props} if isinstance(props, dict) else {})
-            if not ren:
+            if not isinstance(params, dict):
                 new_tools.append(t); continue
-            t2 = json.loads(json.dumps(t)); p2 = t2["function"]["parameters"]
-            p2["properties"] = self._rename(p2["properties"], ren)
-            if isinstance(p2.get("required"), list):
-                p2["required"] = [ren.get(x, x) for x in p2["required"]]
+            t2 = json.loads(json.dumps(t)); ren = {}
+            if not self._rewrite_schema(t2["function"]["parameters"], ren):
+                new_tools.append(t); continue
             aliased[fn.get("name")] = ren; new_tools.append(t2)
         if not aliased:
             return None
@@ -529,9 +577,9 @@ class ParamAlias:
             v = json.loads(a) if isinstance(a, str) else a
         except Exception:
             return a
-        if not isinstance(v, dict):
+        if not isinstance(v, (dict, list)):
             return a
-        return json.dumps(self._rename(v, mapping), ensure_ascii=False)
+        return json.dumps(self._rename_deep(v, mapping), ensure_ascii=False)
 
     def to_client(self, name, args, aliased):
         back = {v: k for k, v in aliased.get(name, {}).items()}
@@ -579,7 +627,17 @@ class VisionOffload:
             {"role": "user", "content": [{"type": "text", "text": ("The agent's question: " + q) if q else "Describe the image."},
                                          {"type": "image_url", "image_url": {"url": url}} if url else part]}]}
         t0 = time.time()
-        r = _post_backend("/v1/chat/completions", body, timeout=600)
+        vt = None
+        if BUDGET.budget:
+            vcost = IMAGE_TOKENS + 1500
+            vt = BUDGET.admit(vcost, "vision-offload")
+            if vt is None:
+                raise RuntimeError("vision-offload budget queue timeout")
+        try:
+            r = _post_backend("/v1/chat/completions", body, timeout=600)
+        finally:
+            if vt is not None:
+                BUDGET.release(vt)
         ch = (r.get("choices") or [{}])[0]
         d = ((ch.get("message") or {}).get("content") or "").strip()
         if not d:
@@ -673,7 +731,7 @@ class SysCheckpoints:
     def _key(j):
         import hashlib
         m0 = j["messages"][0]
-        return hashlib.sha1(json.dumps([m0, j.get("tools"), j.get("tool_choice"), j.get("reasoning_effort")],
+        return hashlib.sha1(json.dumps([m0] + [j.get(rk) for rk in EchoCheck.RENDER_KEYS],
                                        sort_keys=True).encode()).hexdigest()[:16]
 
     def _call(self, method, path, body=None, hdr=None, timeout=600):
@@ -690,21 +748,21 @@ class SysCheckpoints:
 
     def _create(self, k, j):
         sysm = j["messages"][0]
-        base = {k2: j[k2] for k2 in ("tools", "tool_choice", "reasoning_effort") if j.get(k2) is not None}
+        base = {k2: j[k2] for k2 in EchoCheck.RENDER_KEYS if j.get(k2) is not None}
         st, raw = self._call("POST", "/v1/chat/completions/input_tokens", {"model": TAG, "messages": [sysm], **base})
         n_sys = (json.loads(raw).get("input_tokens") or 0) if st == 200 else 0
         if n_sys < self.min:
-            log(f"  sys-ckpt {k[:8]}: system prompt {n_sys:,} tok < {self.min:,}, not pinned"); return None
+            log(f"  sys-ckpt {k[:8]}: system prompt {n_sys:,} tok < {self.min:,}, not pinned"); return None, True
         with self.lock:
             self.n += 1; name = f"sysp-{k[:12]}-{self.n}"
-        seed_body = {"model": TAG, "messages": [sysm, {"role": "user", "content": self.SEED_USER}], "max_tokens": 512,
+        seed_body = {"model": TAG, "messages": [sysm, {"role": "user", "content": self.SEED_USER}], "max_tokens": 2048,
                      "temperature": 1.0, "top_p": 0.95, "top_k": 20, **base}
         st, raw = self._call("POST", "/v1/chat/completions", seed_body, {"X-Loom-Session": name})
         if st != 200:
-            log(f"  sys-ckpt {k[:8]}: seed failed {st} {raw[:120]!r}"); return None
+            log(f"  sys-ckpt {k[:8]}: seed failed {st} {raw[:120]!r}"); return None, False
         d = json.loads(raw); ch = d["choices"][0]; m = ch.get("message") or {}
         if ch.get("finish_reason") != "stop" or m.get("tool_calls"):
-            log(f"  sys-ckpt {k[:8]}: seed did not finish plainly ({ch.get('finish_reason')}), not pinned"); return None
+            log(f"  sys-ckpt {k[:8]}: seed did not finish plainly ({ch.get('finish_reason')}), not pinned"); return None, False
         a = {"role": "assistant", "content": m.get("content")}
         if m.get("reasoning_content"):
             a["reasoning_content"] = m["reasoning_content"]
@@ -713,20 +771,23 @@ class SysCheckpoints:
         for kk, e in old:
             self._call("DELETE", f"/v1/checkpoints/{e['name']}")
             with self.lock:
-                self.ck.pop(kk, None); BUDGET.pinned -= e["position"]
-            log(f"  sys-ckpt {kk[:8]}: unpinned {e['name']} (LRU)")
+                removed = self.ck.pop(kk, None)
+            if removed is not None:
+                BUDGET.adjust_pinned(-removed["position"])
+                log(f"  sys-ckpt {kk[:8]}: unpinned {removed['name']} (LRU)")
         st, raw = self._call("POST", f"/v1/checkpoints/{name}", None, {"X-Loom-Session": name})
         if st != 201:
-            log(f"  sys-ckpt {k[:8]}: pin failed {st} {raw[:120]!r}"); return None
+            log(f"  sys-ckpt {k[:8]}: pin failed {st} {raw[:120]!r}"); return None, False
         pos = int(json.loads(raw).get("position") or 0)
         e = {"name": name, "seed": [{"role": "user", "content": self.SEED_USER}, a], "position": pos}
         with self.lock:
-            self.ck[k] = e; BUDGET.pinned += pos
+            self.ck[k] = e
+        BUDGET.adjust_pinned(pos)
         log(f"  sys-ckpt {k[:8]}: pinned {name} at {pos:,} tokens (system {n_sys:,})")
-        return e
+        return e, False
 
     def apply(self, j):
-        """Insert the seed and return (checkpoint name, key, conversation id), or None to send the request unchanged."""
+        """Insert the seed and return (checkpoint name, key, conversation id, position), or None to send unchanged."""
         import hashlib
         msgs = j.get("messages")
         if not isinstance(msgs, list) or len(msgs) < 2 or not isinstance(msgs[0], dict) or msgs[0].get("role") != "system":
@@ -740,38 +801,36 @@ class SysCheckpoints:
                 self.injected.move_to_end(conv)                         # (the resident row continues it; a
                 j["messages"] = [msgs[0]] + prev[1] + msgs[1:]          # checkpoint fork would discard turn history)
                 return None
-            if k in self.bad:
+            if k in self.bad or not fresh:
                 return None
-            e = self.ck.get(k); inj = False
+            e = self.ck.get(k)
             if e is None:
-                if not fresh or k in self.creating:
+                if k in self.creating:
                     return None
                 self.seen[k] = self.seen.get(k, 0) + 1
                 if self.seen[k] < 2:
                     return None
                 self.creating.add(k)
-            elif not (fresh or inj):
-                return None
         if e is None:
+            permanent = False
             try:
-                e = self._create(k, j)
+                e, permanent = self._create(k, j)
             except Exception as ex:
                 log(f"  sys-ckpt {k[:8]}: error {ex!r}"); e = None
             with self.lock:
                 self.creating.discard(k)
                 if e is None:
-                    self.bad.add(k); return None
+                    if permanent:
+                        self.bad.add(k)
+                    return None
         j["messages"] = [msgs[0]] + e["seed"] + msgs[1:]
-        if not fresh:   # mid-conversation first sighting: never insert into an existing history
-            j["messages"] = msgs
-            return None
         with self.lock:
             if k in self.ck:
                 self.ck.move_to_end(k)
             self.injected[conv] = (k, e["seed"]); self.injected.move_to_end(conv)
             while len(self.injected) > 1024:
                 self.injected.popitem(last=False)
-        return e["name"], k, conv
+        return e["name"], k, conv, e["position"]
 
     def drop(self, k, conv, why):
         structural = "does not extend" in why   # 400: this key can never fork -> stop; 404 (pin gone): re-create later
@@ -779,9 +838,8 @@ class SysCheckpoints:
             e = self.ck.pop(k, None); self.injected.pop(conv, None)
             if structural:
                 self.bad.add(k)
-            if e:
-                BUDGET.pinned -= e["position"]
         if e:
+            BUDGET.adjust_pinned(-e["position"])
             try:
                 self._call("DELETE", f"/v1/checkpoints/{e['name']}")
             except Exception:
@@ -974,6 +1032,7 @@ class Proxy(BaseHTTPRequestHandler):
         gen = {"content": "", "reasoning": "", "tc": {}, "finish": None}
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else None
+        j = None
         model_in = None
         stream = False
         strip_usage = False   # we asked for usage the client did not: drop that chunk again
@@ -1030,12 +1089,16 @@ class Proxy(BaseHTTPRequestHandler):
             headers["X-Loom-Checkpoint"] = self._ck[0]
         if body is not None:
             headers["Content-Length"] = str(len(body))
-        if (BUDGET.budget and method == "POST" and body
-                and self.path.split("?", 1)[0].rstrip("/") in ("/v1/chat/completions", "/chat/completions")):
-            try:
-                jb = json.loads(body)
-            except Exception:
-                jb = None
+        is_chat = (method == "POST" and body
+                   and self.path.split("?", 1)[0].rstrip("/") in ("/v1/chat/completions", "/chat/completions"))
+        jb = None
+        if is_chat:
+            jb = j if isinstance(j, dict) else None
+            if jb is None:
+                try:
+                    jb = json.loads(body)
+                except Exception:
+                    jb = None
             if isinstance(jb, dict):
                 self._echo_msgs = self._plain_msgs if self._plain_msgs is not None else jb.get("messages")
                 if PREFIX_DIFF:
@@ -1049,33 +1112,38 @@ class Proxy(BaseHTTPRequestHandler):
                         broken = ECHO.check(self._echo_msgs, jb)
                     except Exception as e:
                         log(f"  echo error: {e!r}")
-                cost, ptok = _estimate_cost(jb)
-                label = f"prompt {ptok:,}" + (" (est, images)" if _image_parts(jb.get("messages")) else "")
-                fresh = ptok
-                if DPRI:
-                    try:
-                        fresh = ptok if broken else DPRI.fresh(self._echo_msgs, ptok); DPRI.hold(fresh, label)
-                    except Exception as e:
-                        log(f"  decode-priority error: {e!r}")
-                self._ticket = BUDGET.admit(cost, label)
-                if DPRI and self._ticket is not None:
-                    self._dp = DPRI.start(stream, fresh)
-                if self._ticket is None:
-                    self._send_json(503, {"error": {"message": f"Loom busy: waited {BUDGET.timeout:.0f}s for {cost:,} tokens of KV budget",
-                                                    "type": "server_error", "code": "budget_timeout"}})
-                    log(f"{method} {self.path} 503 budget queue timeout (cost {cost:,})")
-                    return
+                if BUDGET.budget:
+                    cost, ptok = _estimate_cost(jb)
+                    label = f"prompt {ptok:,}" + (" (est, images)" if _image_parts(jb.get("messages")) else "")
+                    fresh = ptok
+                    if DPRI:
+                        try:
+                            if self._ck:
+                                fresh = max(0, ptok - self._ck[3])
+                            else:
+                                fresh = ptok if broken else DPRI.fresh(self._echo_msgs, ptok)
+                            DPRI.hold(fresh, label)
+                        except Exception as e:
+                            log(f"  decode-priority error: {e!r}")
+                    self._ticket = BUDGET.admit(cost, label)
+                    if DPRI and self._ticket is not None:
+                        self._dp = DPRI.start(stream, fresh)
+                    if self._ticket is None:
+                        self._send_json(503, {"error": {"message": f"Loom busy: waited {BUDGET.timeout:.0f}s for {cost:,} tokens of KV budget",
+                                                        "type": "server_error", "code": "budget_timeout"}})
+                        log(f"{method} {self.path} 503 budget queue timeout (cost {cost:,})")
+                        return
         self._cap = None
-        if method == "POST" and body and self.path.split("?", 1)[0].rstrip("/") in ("/v1/chat/completions", "/chat/completions"):
+        if is_chat and os.path.exists(os.path.join(CAPTURE_DIR, "ON")):
             with _CAP_LOCK:
                 _CAP_SEQ[0] += 1; self._cap = _CAP_SEQ[0]
             _capture("req", self._cap, {"headers": {k: v for k, v in headers.items() if k.lower().startswith("x-loom")},
-                                        "body": json.loads(body)})
-        meter = LiveMeter(body) if (LIVE and stream and method == "POST" and body and "chat/completions" in self.path) else None
+                                        "body": jb if isinstance(jb, dict) else json.loads(body)})
+        meter = LiveMeter(jb if isinstance(jb, dict) else body) if (LIVE and stream and is_chat) else None
+        self._meter = meter
         try:
             c, r = self._backend(method, body, headers)
         except Exception as e:
-            if meter: meter.done()
             self._send_json(502, {"error": {"message": f"loom backend not reachable: {e}", "type": "server_error"}})
             log(f"{method} {self.path} 502 backend down")
             return
@@ -1264,9 +1332,14 @@ class Proxy(BaseHTTPRequestHandler):
                             if tc_name.get(i) in self._aliased and isinstance(fn.get("arguments"), str):
                                 held[i] = held.get(i, "") + fn["arguments"]; fn["arguments"] = ""; changed = True
                         if c_.get("finish_reason") and held:
-                            dl.setdefault("tool_calls", [])
+                            tcs = dl.setdefault("tool_calls", [])
+                            by_idx = {tc.get("index", 0): tc for tc in tcs if isinstance(tc, dict)}
                             for i in sorted(held):
-                                dl["tool_calls"].append({"index": i, "function": {"arguments": ALIAS.to_client(tc_name[i], held[i], self._aliased)}})
+                                renamed = ALIAS.to_client(tc_name[i], held[i], self._aliased)
+                                if i in by_idx and isinstance(by_idx[i].get("function"), dict):
+                                    by_idx[i]["function"]["arguments"] = renamed
+                                else:
+                                    tcs.append({"index": i, "function": {"arguments": renamed}})
                             c_["delta"] = dl; held.clear(); changed = True
                     if changed:
                         line = b"data: " + json.dumps(d, ensure_ascii=False).encode()
@@ -1352,7 +1425,9 @@ class Proxy(BaseHTTPRequestHandler):
             except Exception as e:
                 log(f"  echo record error: {e!r}")
         c.close()
-        if meter: meter.done()
+        if meter:
+            meter.done()
+            self._meter = None
         self.close_connection = True
         if self.path.startswith("/v1/"):
             ttft = first_tok or first
@@ -1390,10 +1465,12 @@ class Proxy(BaseHTTPRequestHandler):
         self._relay("GET")
 
     def do_POST(self):
-        self._ticket = None; self._ck = None; self._plain_body = None; self._plain_msgs = None; self._dp = None
+        self._ticket = None; self._ck = None; self._plain_body = None; self._plain_msgs = None; self._dp = None; self._meter = None
         try:
             self._relay("POST")
         finally:
+            if self._meter is not None:
+                self._meter.done()
             if self._dp is not None:
                 DPRI.end(self._dp)
             if self._ticket is not None:
