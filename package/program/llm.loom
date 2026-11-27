@@ -19317,10 +19317,86 @@ kernel.def export("g_ink_mix2") @g_ink_mix2(%tokens: index, %q_cnt: index) {
   %dtb0 = vector.dotf<reassoc|contract> %b0, %q0, %zero_f : vector<4xf32>, vector<4xf32>, f32
   %dtb1 = vector.dotf<reassoc|contract> %b1, %q1, %dtb0 : vector<4xf32>, vector<4xf32>, f32
   %dtb2 = vector.dotf<reassoc|contract> %b2, %q2, %dtb1 : vector<4xf32>, vector<4xf32>, f32
-  %ta_sq = kernel.workgroup.reduce<addf> %sqa2 : f32
-  %ta_dt = kernel.workgroup.reduce<addf> %dta2 : f32
-  %tb_sq = kernel.workgroup.reduce<addf> %sqb2 : f32
-  %tb_dt = kernel.workgroup.reduce<addf> %dtb2 : f32
+  // Batched 1-barrier workgroup reduction for all states.
+  %mr_wave_r = kernel.subgroup.id : index
+  %mr_wave = index.assume %mr_wave_r [range(%mr_wave_r, 0, 7)] : index
+  %mr_lane_r = kernel.subgroup.lane.id : index
+  %mr_lane = index.assume %mr_lane_r [range(%mr_lane_r, 0, 31)] : index
+  %mr_bytes = index.constant 128 : offset
+  %mr_lds = buffer.alloca<workgroup> align(16) %mr_bytes : buffer
+  %mr_v = buffer.view %mr_lds[%zero] : buffer -> view<8x4xf32>
+  %mr_w0 = kernel.subgroup.reduce<addf> %sqa2 : f32
+  %mr_w1 = kernel.subgroup.reduce<addf> %dta2 : f32
+  %mr_w2 = kernel.subgroup.reduce<addf> %sqb2 : f32
+  %mr_w3 = kernel.subgroup.reduce<addf> %dtb2 : f32
+  %mr_l0 = index.cmp eq, %mr_lane, %c0 : index
+  scf.if %mr_l0 {
+    view.store %mr_w0, %mr_v[%mr_wave, 0] : f32, view<8x4xf32>
+    view.store %mr_w1, %mr_v[%mr_wave, 1] : f32, view<8x4xf32>
+    view.store %mr_w2, %mr_v[%mr_wave, 2] : f32, view<8x4xf32>
+    view.store %mr_w3, %mr_v[%mr_wave, 3] : f32, view<8x4xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %mr_s0_0 = view.load %mr_v[0, 0] : view<8x4xf32> -> f32
+  %mr_s0_1 = view.load %mr_v[1, 0] : view<8x4xf32> -> f32
+  %mr_s0_2 = view.load %mr_v[2, 0] : view<8x4xf32> -> f32
+  %mr_s0_3 = view.load %mr_v[3, 0] : view<8x4xf32> -> f32
+  %mr_s0_4 = view.load %mr_v[4, 0] : view<8x4xf32> -> f32
+  %mr_s0_5 = view.load %mr_v[5, 0] : view<8x4xf32> -> f32
+  %mr_s0_6 = view.load %mr_v[6, 0] : view<8x4xf32> -> f32
+  %mr_s0_7 = view.load %mr_v[7, 0] : view<8x4xf32> -> f32
+  %mr_a0_0 = scalar.addf %mr_s0_0, %mr_s0_1 : f32
+  %mr_a0_1 = scalar.addf %mr_s0_2, %mr_s0_3 : f32
+  %mr_a0_2 = scalar.addf %mr_s0_4, %mr_s0_5 : f32
+  %mr_a0_3 = scalar.addf %mr_s0_6, %mr_s0_7 : f32
+  %mr_a0_4 = scalar.addf %mr_a0_0, %mr_a0_1 : f32
+  %mr_a0_5 = scalar.addf %mr_a0_2, %mr_a0_3 : f32
+  %ta_sq = scalar.addf %mr_a0_4, %mr_a0_5 : f32
+  %mr_s1_0 = view.load %mr_v[0, 1] : view<8x4xf32> -> f32
+  %mr_s1_1 = view.load %mr_v[1, 1] : view<8x4xf32> -> f32
+  %mr_s1_2 = view.load %mr_v[2, 1] : view<8x4xf32> -> f32
+  %mr_s1_3 = view.load %mr_v[3, 1] : view<8x4xf32> -> f32
+  %mr_s1_4 = view.load %mr_v[4, 1] : view<8x4xf32> -> f32
+  %mr_s1_5 = view.load %mr_v[5, 1] : view<8x4xf32> -> f32
+  %mr_s1_6 = view.load %mr_v[6, 1] : view<8x4xf32> -> f32
+  %mr_s1_7 = view.load %mr_v[7, 1] : view<8x4xf32> -> f32
+  %mr_a1_0 = scalar.addf %mr_s1_0, %mr_s1_1 : f32
+  %mr_a1_1 = scalar.addf %mr_s1_2, %mr_s1_3 : f32
+  %mr_a1_2 = scalar.addf %mr_s1_4, %mr_s1_5 : f32
+  %mr_a1_3 = scalar.addf %mr_s1_6, %mr_s1_7 : f32
+  %mr_a1_4 = scalar.addf %mr_a1_0, %mr_a1_1 : f32
+  %mr_a1_5 = scalar.addf %mr_a1_2, %mr_a1_3 : f32
+  %ta_dt = scalar.addf %mr_a1_4, %mr_a1_5 : f32
+  %mr_s2_0 = view.load %mr_v[0, 2] : view<8x4xf32> -> f32
+  %mr_s2_1 = view.load %mr_v[1, 2] : view<8x4xf32> -> f32
+  %mr_s2_2 = view.load %mr_v[2, 2] : view<8x4xf32> -> f32
+  %mr_s2_3 = view.load %mr_v[3, 2] : view<8x4xf32> -> f32
+  %mr_s2_4 = view.load %mr_v[4, 2] : view<8x4xf32> -> f32
+  %mr_s2_5 = view.load %mr_v[5, 2] : view<8x4xf32> -> f32
+  %mr_s2_6 = view.load %mr_v[6, 2] : view<8x4xf32> -> f32
+  %mr_s2_7 = view.load %mr_v[7, 2] : view<8x4xf32> -> f32
+  %mr_a2_0 = scalar.addf %mr_s2_0, %mr_s2_1 : f32
+  %mr_a2_1 = scalar.addf %mr_s2_2, %mr_s2_3 : f32
+  %mr_a2_2 = scalar.addf %mr_s2_4, %mr_s2_5 : f32
+  %mr_a2_3 = scalar.addf %mr_s2_6, %mr_s2_7 : f32
+  %mr_a2_4 = scalar.addf %mr_a2_0, %mr_a2_1 : f32
+  %mr_a2_5 = scalar.addf %mr_a2_2, %mr_a2_3 : f32
+  %tb_sq = scalar.addf %mr_a2_4, %mr_a2_5 : f32
+  %mr_s3_0 = view.load %mr_v[0, 3] : view<8x4xf32> -> f32
+  %mr_s3_1 = view.load %mr_v[1, 3] : view<8x4xf32> -> f32
+  %mr_s3_2 = view.load %mr_v[2, 3] : view<8x4xf32> -> f32
+  %mr_s3_3 = view.load %mr_v[3, 3] : view<8x4xf32> -> f32
+  %mr_s3_4 = view.load %mr_v[4, 3] : view<8x4xf32> -> f32
+  %mr_s3_5 = view.load %mr_v[5, 3] : view<8x4xf32> -> f32
+  %mr_s3_6 = view.load %mr_v[6, 3] : view<8x4xf32> -> f32
+  %mr_s3_7 = view.load %mr_v[7, 3] : view<8x4xf32> -> f32
+  %mr_a3_0 = scalar.addf %mr_s3_0, %mr_s3_1 : f32
+  %mr_a3_1 = scalar.addf %mr_s3_2, %mr_s3_3 : f32
+  %mr_a3_2 = scalar.addf %mr_s3_4, %mr_s3_5 : f32
+  %mr_a3_3 = scalar.addf %mr_s3_6, %mr_s3_7 : f32
+  %mr_a3_4 = scalar.addf %mr_a3_0, %mr_a3_1 : f32
+  %mr_a3_5 = scalar.addf %mr_a3_2, %mr_a3_3 : f32
+  %tb_dt = scalar.addf %mr_a3_4, %mr_a3_5 : f32
   %ma = scalar.mulf %ta_sq, %inv_H : f32
   %va = scalar.addf %ma, %eps : f32
   %ira = scalar.rsqrtf %va : f32
@@ -19454,22 +19530,130 @@ kernel.def export("g_ink_mix3") @g_ink_mix3(%tokens: index, %q_cnt: index) {
   %dt2_0 = vector.dotf<reassoc|contract> %s2_0, %q0, %zero_f : vector<4xf32>, vector<4xf32>, f32
   %dt2_1 = vector.dotf<reassoc|contract> %s2_1, %q1, %dt2_0 : vector<4xf32>, vector<4xf32>, f32
   %dt2_2 = vector.dotf<reassoc|contract> %s2_2, %q2, %dt2_1 : vector<4xf32>, vector<4xf32>, f32
-  %tsq0 = kernel.workgroup.reduce<addf> %sq0_2 : f32
-  %tdt0 = kernel.workgroup.reduce<addf> %dt0_2 : f32
+  // Batched 1-barrier workgroup reduction for all states.
+  %mr_wave_r = kernel.subgroup.id : index
+  %mr_wave = index.assume %mr_wave_r [range(%mr_wave_r, 0, 7)] : index
+  %mr_lane_r = kernel.subgroup.lane.id : index
+  %mr_lane = index.assume %mr_lane_r [range(%mr_lane_r, 0, 31)] : index
+  %mr_bytes = index.constant 192 : offset
+  %mr_lds = buffer.alloca<workgroup> align(16) %mr_bytes : buffer
+  %mr_v = buffer.view %mr_lds[%zero] : buffer -> view<8x6xf32>
+  %mr_w0 = kernel.subgroup.reduce<addf> %sq0_2 : f32
+  %mr_w1 = kernel.subgroup.reduce<addf> %dt0_2 : f32
+  %mr_w2 = kernel.subgroup.reduce<addf> %sq1_2 : f32
+  %mr_w3 = kernel.subgroup.reduce<addf> %dt1_2 : f32
+  %mr_w4 = kernel.subgroup.reduce<addf> %sq2_2 : f32
+  %mr_w5 = kernel.subgroup.reduce<addf> %dt2_2 : f32
+  %mr_l0 = index.cmp eq, %mr_lane, %c0 : index
+  scf.if %mr_l0 {
+    view.store %mr_w0, %mr_v[%mr_wave, 0] : f32, view<8x6xf32>
+    view.store %mr_w1, %mr_v[%mr_wave, 1] : f32, view<8x6xf32>
+    view.store %mr_w2, %mr_v[%mr_wave, 2] : f32, view<8x6xf32>
+    view.store %mr_w3, %mr_v[%mr_wave, 3] : f32, view<8x6xf32>
+    view.store %mr_w4, %mr_v[%mr_wave, 4] : f32, view<8x6xf32>
+    view.store %mr_w5, %mr_v[%mr_wave, 5] : f32, view<8x6xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %mr_s0_0 = view.load %mr_v[0, 0] : view<8x6xf32> -> f32
+  %mr_s0_1 = view.load %mr_v[1, 0] : view<8x6xf32> -> f32
+  %mr_s0_2 = view.load %mr_v[2, 0] : view<8x6xf32> -> f32
+  %mr_s0_3 = view.load %mr_v[3, 0] : view<8x6xf32> -> f32
+  %mr_s0_4 = view.load %mr_v[4, 0] : view<8x6xf32> -> f32
+  %mr_s0_5 = view.load %mr_v[5, 0] : view<8x6xf32> -> f32
+  %mr_s0_6 = view.load %mr_v[6, 0] : view<8x6xf32> -> f32
+  %mr_s0_7 = view.load %mr_v[7, 0] : view<8x6xf32> -> f32
+  %mr_a0_0 = scalar.addf %mr_s0_0, %mr_s0_1 : f32
+  %mr_a0_1 = scalar.addf %mr_s0_2, %mr_s0_3 : f32
+  %mr_a0_2 = scalar.addf %mr_s0_4, %mr_s0_5 : f32
+  %mr_a0_3 = scalar.addf %mr_s0_6, %mr_s0_7 : f32
+  %mr_a0_4 = scalar.addf %mr_a0_0, %mr_a0_1 : f32
+  %mr_a0_5 = scalar.addf %mr_a0_2, %mr_a0_3 : f32
+  %tsq0 = scalar.addf %mr_a0_4, %mr_a0_5 : f32
+  %mr_s1_0 = view.load %mr_v[0, 1] : view<8x6xf32> -> f32
+  %mr_s1_1 = view.load %mr_v[1, 1] : view<8x6xf32> -> f32
+  %mr_s1_2 = view.load %mr_v[2, 1] : view<8x6xf32> -> f32
+  %mr_s1_3 = view.load %mr_v[3, 1] : view<8x6xf32> -> f32
+  %mr_s1_4 = view.load %mr_v[4, 1] : view<8x6xf32> -> f32
+  %mr_s1_5 = view.load %mr_v[5, 1] : view<8x6xf32> -> f32
+  %mr_s1_6 = view.load %mr_v[6, 1] : view<8x6xf32> -> f32
+  %mr_s1_7 = view.load %mr_v[7, 1] : view<8x6xf32> -> f32
+  %mr_a1_0 = scalar.addf %mr_s1_0, %mr_s1_1 : f32
+  %mr_a1_1 = scalar.addf %mr_s1_2, %mr_s1_3 : f32
+  %mr_a1_2 = scalar.addf %mr_s1_4, %mr_s1_5 : f32
+  %mr_a1_3 = scalar.addf %mr_s1_6, %mr_s1_7 : f32
+  %mr_a1_4 = scalar.addf %mr_a1_0, %mr_a1_1 : f32
+  %mr_a1_5 = scalar.addf %mr_a1_2, %mr_a1_3 : f32
+  %tdt0 = scalar.addf %mr_a1_4, %mr_a1_5 : f32
+  %mr_s2_0 = view.load %mr_v[0, 2] : view<8x6xf32> -> f32
+  %mr_s2_1 = view.load %mr_v[1, 2] : view<8x6xf32> -> f32
+  %mr_s2_2 = view.load %mr_v[2, 2] : view<8x6xf32> -> f32
+  %mr_s2_3 = view.load %mr_v[3, 2] : view<8x6xf32> -> f32
+  %mr_s2_4 = view.load %mr_v[4, 2] : view<8x6xf32> -> f32
+  %mr_s2_5 = view.load %mr_v[5, 2] : view<8x6xf32> -> f32
+  %mr_s2_6 = view.load %mr_v[6, 2] : view<8x6xf32> -> f32
+  %mr_s2_7 = view.load %mr_v[7, 2] : view<8x6xf32> -> f32
+  %mr_a2_0 = scalar.addf %mr_s2_0, %mr_s2_1 : f32
+  %mr_a2_1 = scalar.addf %mr_s2_2, %mr_s2_3 : f32
+  %mr_a2_2 = scalar.addf %mr_s2_4, %mr_s2_5 : f32
+  %mr_a2_3 = scalar.addf %mr_s2_6, %mr_s2_7 : f32
+  %mr_a2_4 = scalar.addf %mr_a2_0, %mr_a2_1 : f32
+  %mr_a2_5 = scalar.addf %mr_a2_2, %mr_a2_3 : f32
+  %tsq1 = scalar.addf %mr_a2_4, %mr_a2_5 : f32
+  %mr_s3_0 = view.load %mr_v[0, 3] : view<8x6xf32> -> f32
+  %mr_s3_1 = view.load %mr_v[1, 3] : view<8x6xf32> -> f32
+  %mr_s3_2 = view.load %mr_v[2, 3] : view<8x6xf32> -> f32
+  %mr_s3_3 = view.load %mr_v[3, 3] : view<8x6xf32> -> f32
+  %mr_s3_4 = view.load %mr_v[4, 3] : view<8x6xf32> -> f32
+  %mr_s3_5 = view.load %mr_v[5, 3] : view<8x6xf32> -> f32
+  %mr_s3_6 = view.load %mr_v[6, 3] : view<8x6xf32> -> f32
+  %mr_s3_7 = view.load %mr_v[7, 3] : view<8x6xf32> -> f32
+  %mr_a3_0 = scalar.addf %mr_s3_0, %mr_s3_1 : f32
+  %mr_a3_1 = scalar.addf %mr_s3_2, %mr_s3_3 : f32
+  %mr_a3_2 = scalar.addf %mr_s3_4, %mr_s3_5 : f32
+  %mr_a3_3 = scalar.addf %mr_s3_6, %mr_s3_7 : f32
+  %mr_a3_4 = scalar.addf %mr_a3_0, %mr_a3_1 : f32
+  %mr_a3_5 = scalar.addf %mr_a3_2, %mr_a3_3 : f32
+  %tdt1 = scalar.addf %mr_a3_4, %mr_a3_5 : f32
+  %mr_s4_0 = view.load %mr_v[0, 4] : view<8x6xf32> -> f32
+  %mr_s4_1 = view.load %mr_v[1, 4] : view<8x6xf32> -> f32
+  %mr_s4_2 = view.load %mr_v[2, 4] : view<8x6xf32> -> f32
+  %mr_s4_3 = view.load %mr_v[3, 4] : view<8x6xf32> -> f32
+  %mr_s4_4 = view.load %mr_v[4, 4] : view<8x6xf32> -> f32
+  %mr_s4_5 = view.load %mr_v[5, 4] : view<8x6xf32> -> f32
+  %mr_s4_6 = view.load %mr_v[6, 4] : view<8x6xf32> -> f32
+  %mr_s4_7 = view.load %mr_v[7, 4] : view<8x6xf32> -> f32
+  %mr_a4_0 = scalar.addf %mr_s4_0, %mr_s4_1 : f32
+  %mr_a4_1 = scalar.addf %mr_s4_2, %mr_s4_3 : f32
+  %mr_a4_2 = scalar.addf %mr_s4_4, %mr_s4_5 : f32
+  %mr_a4_3 = scalar.addf %mr_s4_6, %mr_s4_7 : f32
+  %mr_a4_4 = scalar.addf %mr_a4_0, %mr_a4_1 : f32
+  %mr_a4_5 = scalar.addf %mr_a4_2, %mr_a4_3 : f32
+  %tsq2 = scalar.addf %mr_a4_4, %mr_a4_5 : f32
+  %mr_s5_0 = view.load %mr_v[0, 5] : view<8x6xf32> -> f32
+  %mr_s5_1 = view.load %mr_v[1, 5] : view<8x6xf32> -> f32
+  %mr_s5_2 = view.load %mr_v[2, 5] : view<8x6xf32> -> f32
+  %mr_s5_3 = view.load %mr_v[3, 5] : view<8x6xf32> -> f32
+  %mr_s5_4 = view.load %mr_v[4, 5] : view<8x6xf32> -> f32
+  %mr_s5_5 = view.load %mr_v[5, 5] : view<8x6xf32> -> f32
+  %mr_s5_6 = view.load %mr_v[6, 5] : view<8x6xf32> -> f32
+  %mr_s5_7 = view.load %mr_v[7, 5] : view<8x6xf32> -> f32
+  %mr_a5_0 = scalar.addf %mr_s5_0, %mr_s5_1 : f32
+  %mr_a5_1 = scalar.addf %mr_s5_2, %mr_s5_3 : f32
+  %mr_a5_2 = scalar.addf %mr_s5_4, %mr_s5_5 : f32
+  %mr_a5_3 = scalar.addf %mr_s5_6, %mr_s5_7 : f32
+  %mr_a5_4 = scalar.addf %mr_a5_0, %mr_a5_1 : f32
+  %mr_a5_5 = scalar.addf %mr_a5_2, %mr_a5_3 : f32
+  %tdt2 = scalar.addf %mr_a5_4, %mr_a5_5 : f32
   %mn0 = scalar.mulf %tsq0, %inv_H : f32
   %vr0 = scalar.addf %mn0, %eps : f32
   %ir0 = scalar.rsqrtf %vr0 : f32
   %sc0_a = scalar.mulf %tdt0, %ir0 : f32
   %sc0 = scalar.mulf %sc0_a, %inv_sqrt_H : f32
-  %tsq1 = kernel.workgroup.reduce<addf> %sq1_2 : f32
-  %tdt1 = kernel.workgroup.reduce<addf> %dt1_2 : f32
   %mn1 = scalar.mulf %tsq1, %inv_H : f32
   %vr1 = scalar.addf %mn1, %eps : f32
   %ir1 = scalar.rsqrtf %vr1 : f32
   %sc1_a = scalar.mulf %tdt1, %ir1 : f32
   %sc1 = scalar.mulf %sc1_a, %inv_sqrt_H : f32
-  %tsq2 = kernel.workgroup.reduce<addf> %sq2_2 : f32
-  %tdt2 = kernel.workgroup.reduce<addf> %dt2_2 : f32
   %mn2 = scalar.mulf %tsq2, %inv_H : f32
   %vr2 = scalar.addf %mn2, %eps : f32
   %ir2 = scalar.rsqrtf %vr2 : f32
@@ -19630,29 +19814,169 @@ kernel.def export("g_ink_mix4") @g_ink_mix4(%tokens: index, %q_cnt: index) {
   %dt3_0 = vector.dotf<reassoc|contract> %s3_0, %q0, %zero_f : vector<4xf32>, vector<4xf32>, f32
   %dt3_1 = vector.dotf<reassoc|contract> %s3_1, %q1, %dt3_0 : vector<4xf32>, vector<4xf32>, f32
   %dt3_2 = vector.dotf<reassoc|contract> %s3_2, %q2, %dt3_1 : vector<4xf32>, vector<4xf32>, f32
-  %tsq0 = kernel.workgroup.reduce<addf> %sq0_2 : f32
-  %tdt0 = kernel.workgroup.reduce<addf> %dt0_2 : f32
+  // Batched 1-barrier workgroup reduction for all states.
+  %mr_wave_r = kernel.subgroup.id : index
+  %mr_wave = index.assume %mr_wave_r [range(%mr_wave_r, 0, 7)] : index
+  %mr_lane_r = kernel.subgroup.lane.id : index
+  %mr_lane = index.assume %mr_lane_r [range(%mr_lane_r, 0, 31)] : index
+  %mr_bytes = index.constant 256 : offset
+  %mr_lds = buffer.alloca<workgroup> align(16) %mr_bytes : buffer
+  %mr_v = buffer.view %mr_lds[%zero] : buffer -> view<8x8xf32>
+  %mr_w0 = kernel.subgroup.reduce<addf> %sq0_2 : f32
+  %mr_w1 = kernel.subgroup.reduce<addf> %dt0_2 : f32
+  %mr_w2 = kernel.subgroup.reduce<addf> %sq1_2 : f32
+  %mr_w3 = kernel.subgroup.reduce<addf> %dt1_2 : f32
+  %mr_w4 = kernel.subgroup.reduce<addf> %sq2_2 : f32
+  %mr_w5 = kernel.subgroup.reduce<addf> %dt2_2 : f32
+  %mr_w6 = kernel.subgroup.reduce<addf> %sq3_2 : f32
+  %mr_w7 = kernel.subgroup.reduce<addf> %dt3_2 : f32
+  %mr_l0 = index.cmp eq, %mr_lane, %c0 : index
+  scf.if %mr_l0 {
+    view.store %mr_w0, %mr_v[%mr_wave, 0] : f32, view<8x8xf32>
+    view.store %mr_w1, %mr_v[%mr_wave, 1] : f32, view<8x8xf32>
+    view.store %mr_w2, %mr_v[%mr_wave, 2] : f32, view<8x8xf32>
+    view.store %mr_w3, %mr_v[%mr_wave, 3] : f32, view<8x8xf32>
+    view.store %mr_w4, %mr_v[%mr_wave, 4] : f32, view<8x8xf32>
+    view.store %mr_w5, %mr_v[%mr_wave, 5] : f32, view<8x8xf32>
+    view.store %mr_w6, %mr_v[%mr_wave, 6] : f32, view<8x8xf32>
+    view.store %mr_w7, %mr_v[%mr_wave, 7] : f32, view<8x8xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %mr_s0_0 = view.load %mr_v[0, 0] : view<8x8xf32> -> f32
+  %mr_s0_1 = view.load %mr_v[1, 0] : view<8x8xf32> -> f32
+  %mr_s0_2 = view.load %mr_v[2, 0] : view<8x8xf32> -> f32
+  %mr_s0_3 = view.load %mr_v[3, 0] : view<8x8xf32> -> f32
+  %mr_s0_4 = view.load %mr_v[4, 0] : view<8x8xf32> -> f32
+  %mr_s0_5 = view.load %mr_v[5, 0] : view<8x8xf32> -> f32
+  %mr_s0_6 = view.load %mr_v[6, 0] : view<8x8xf32> -> f32
+  %mr_s0_7 = view.load %mr_v[7, 0] : view<8x8xf32> -> f32
+  %mr_a0_0 = scalar.addf %mr_s0_0, %mr_s0_1 : f32
+  %mr_a0_1 = scalar.addf %mr_s0_2, %mr_s0_3 : f32
+  %mr_a0_2 = scalar.addf %mr_s0_4, %mr_s0_5 : f32
+  %mr_a0_3 = scalar.addf %mr_s0_6, %mr_s0_7 : f32
+  %mr_a0_4 = scalar.addf %mr_a0_0, %mr_a0_1 : f32
+  %mr_a0_5 = scalar.addf %mr_a0_2, %mr_a0_3 : f32
+  %tsq0 = scalar.addf %mr_a0_4, %mr_a0_5 : f32
+  %mr_s1_0 = view.load %mr_v[0, 1] : view<8x8xf32> -> f32
+  %mr_s1_1 = view.load %mr_v[1, 1] : view<8x8xf32> -> f32
+  %mr_s1_2 = view.load %mr_v[2, 1] : view<8x8xf32> -> f32
+  %mr_s1_3 = view.load %mr_v[3, 1] : view<8x8xf32> -> f32
+  %mr_s1_4 = view.load %mr_v[4, 1] : view<8x8xf32> -> f32
+  %mr_s1_5 = view.load %mr_v[5, 1] : view<8x8xf32> -> f32
+  %mr_s1_6 = view.load %mr_v[6, 1] : view<8x8xf32> -> f32
+  %mr_s1_7 = view.load %mr_v[7, 1] : view<8x8xf32> -> f32
+  %mr_a1_0 = scalar.addf %mr_s1_0, %mr_s1_1 : f32
+  %mr_a1_1 = scalar.addf %mr_s1_2, %mr_s1_3 : f32
+  %mr_a1_2 = scalar.addf %mr_s1_4, %mr_s1_5 : f32
+  %mr_a1_3 = scalar.addf %mr_s1_6, %mr_s1_7 : f32
+  %mr_a1_4 = scalar.addf %mr_a1_0, %mr_a1_1 : f32
+  %mr_a1_5 = scalar.addf %mr_a1_2, %mr_a1_3 : f32
+  %tdt0 = scalar.addf %mr_a1_4, %mr_a1_5 : f32
+  %mr_s2_0 = view.load %mr_v[0, 2] : view<8x8xf32> -> f32
+  %mr_s2_1 = view.load %mr_v[1, 2] : view<8x8xf32> -> f32
+  %mr_s2_2 = view.load %mr_v[2, 2] : view<8x8xf32> -> f32
+  %mr_s2_3 = view.load %mr_v[3, 2] : view<8x8xf32> -> f32
+  %mr_s2_4 = view.load %mr_v[4, 2] : view<8x8xf32> -> f32
+  %mr_s2_5 = view.load %mr_v[5, 2] : view<8x8xf32> -> f32
+  %mr_s2_6 = view.load %mr_v[6, 2] : view<8x8xf32> -> f32
+  %mr_s2_7 = view.load %mr_v[7, 2] : view<8x8xf32> -> f32
+  %mr_a2_0 = scalar.addf %mr_s2_0, %mr_s2_1 : f32
+  %mr_a2_1 = scalar.addf %mr_s2_2, %mr_s2_3 : f32
+  %mr_a2_2 = scalar.addf %mr_s2_4, %mr_s2_5 : f32
+  %mr_a2_3 = scalar.addf %mr_s2_6, %mr_s2_7 : f32
+  %mr_a2_4 = scalar.addf %mr_a2_0, %mr_a2_1 : f32
+  %mr_a2_5 = scalar.addf %mr_a2_2, %mr_a2_3 : f32
+  %tsq1 = scalar.addf %mr_a2_4, %mr_a2_5 : f32
+  %mr_s3_0 = view.load %mr_v[0, 3] : view<8x8xf32> -> f32
+  %mr_s3_1 = view.load %mr_v[1, 3] : view<8x8xf32> -> f32
+  %mr_s3_2 = view.load %mr_v[2, 3] : view<8x8xf32> -> f32
+  %mr_s3_3 = view.load %mr_v[3, 3] : view<8x8xf32> -> f32
+  %mr_s3_4 = view.load %mr_v[4, 3] : view<8x8xf32> -> f32
+  %mr_s3_5 = view.load %mr_v[5, 3] : view<8x8xf32> -> f32
+  %mr_s3_6 = view.load %mr_v[6, 3] : view<8x8xf32> -> f32
+  %mr_s3_7 = view.load %mr_v[7, 3] : view<8x8xf32> -> f32
+  %mr_a3_0 = scalar.addf %mr_s3_0, %mr_s3_1 : f32
+  %mr_a3_1 = scalar.addf %mr_s3_2, %mr_s3_3 : f32
+  %mr_a3_2 = scalar.addf %mr_s3_4, %mr_s3_5 : f32
+  %mr_a3_3 = scalar.addf %mr_s3_6, %mr_s3_7 : f32
+  %mr_a3_4 = scalar.addf %mr_a3_0, %mr_a3_1 : f32
+  %mr_a3_5 = scalar.addf %mr_a3_2, %mr_a3_3 : f32
+  %tdt1 = scalar.addf %mr_a3_4, %mr_a3_5 : f32
+  %mr_s4_0 = view.load %mr_v[0, 4] : view<8x8xf32> -> f32
+  %mr_s4_1 = view.load %mr_v[1, 4] : view<8x8xf32> -> f32
+  %mr_s4_2 = view.load %mr_v[2, 4] : view<8x8xf32> -> f32
+  %mr_s4_3 = view.load %mr_v[3, 4] : view<8x8xf32> -> f32
+  %mr_s4_4 = view.load %mr_v[4, 4] : view<8x8xf32> -> f32
+  %mr_s4_5 = view.load %mr_v[5, 4] : view<8x8xf32> -> f32
+  %mr_s4_6 = view.load %mr_v[6, 4] : view<8x8xf32> -> f32
+  %mr_s4_7 = view.load %mr_v[7, 4] : view<8x8xf32> -> f32
+  %mr_a4_0 = scalar.addf %mr_s4_0, %mr_s4_1 : f32
+  %mr_a4_1 = scalar.addf %mr_s4_2, %mr_s4_3 : f32
+  %mr_a4_2 = scalar.addf %mr_s4_4, %mr_s4_5 : f32
+  %mr_a4_3 = scalar.addf %mr_s4_6, %mr_s4_7 : f32
+  %mr_a4_4 = scalar.addf %mr_a4_0, %mr_a4_1 : f32
+  %mr_a4_5 = scalar.addf %mr_a4_2, %mr_a4_3 : f32
+  %tsq2 = scalar.addf %mr_a4_4, %mr_a4_5 : f32
+  %mr_s5_0 = view.load %mr_v[0, 5] : view<8x8xf32> -> f32
+  %mr_s5_1 = view.load %mr_v[1, 5] : view<8x8xf32> -> f32
+  %mr_s5_2 = view.load %mr_v[2, 5] : view<8x8xf32> -> f32
+  %mr_s5_3 = view.load %mr_v[3, 5] : view<8x8xf32> -> f32
+  %mr_s5_4 = view.load %mr_v[4, 5] : view<8x8xf32> -> f32
+  %mr_s5_5 = view.load %mr_v[5, 5] : view<8x8xf32> -> f32
+  %mr_s5_6 = view.load %mr_v[6, 5] : view<8x8xf32> -> f32
+  %mr_s5_7 = view.load %mr_v[7, 5] : view<8x8xf32> -> f32
+  %mr_a5_0 = scalar.addf %mr_s5_0, %mr_s5_1 : f32
+  %mr_a5_1 = scalar.addf %mr_s5_2, %mr_s5_3 : f32
+  %mr_a5_2 = scalar.addf %mr_s5_4, %mr_s5_5 : f32
+  %mr_a5_3 = scalar.addf %mr_s5_6, %mr_s5_7 : f32
+  %mr_a5_4 = scalar.addf %mr_a5_0, %mr_a5_1 : f32
+  %mr_a5_5 = scalar.addf %mr_a5_2, %mr_a5_3 : f32
+  %tdt2 = scalar.addf %mr_a5_4, %mr_a5_5 : f32
+  %mr_s6_0 = view.load %mr_v[0, 6] : view<8x8xf32> -> f32
+  %mr_s6_1 = view.load %mr_v[1, 6] : view<8x8xf32> -> f32
+  %mr_s6_2 = view.load %mr_v[2, 6] : view<8x8xf32> -> f32
+  %mr_s6_3 = view.load %mr_v[3, 6] : view<8x8xf32> -> f32
+  %mr_s6_4 = view.load %mr_v[4, 6] : view<8x8xf32> -> f32
+  %mr_s6_5 = view.load %mr_v[5, 6] : view<8x8xf32> -> f32
+  %mr_s6_6 = view.load %mr_v[6, 6] : view<8x8xf32> -> f32
+  %mr_s6_7 = view.load %mr_v[7, 6] : view<8x8xf32> -> f32
+  %mr_a6_0 = scalar.addf %mr_s6_0, %mr_s6_1 : f32
+  %mr_a6_1 = scalar.addf %mr_s6_2, %mr_s6_3 : f32
+  %mr_a6_2 = scalar.addf %mr_s6_4, %mr_s6_5 : f32
+  %mr_a6_3 = scalar.addf %mr_s6_6, %mr_s6_7 : f32
+  %mr_a6_4 = scalar.addf %mr_a6_0, %mr_a6_1 : f32
+  %mr_a6_5 = scalar.addf %mr_a6_2, %mr_a6_3 : f32
+  %tsq3 = scalar.addf %mr_a6_4, %mr_a6_5 : f32
+  %mr_s7_0 = view.load %mr_v[0, 7] : view<8x8xf32> -> f32
+  %mr_s7_1 = view.load %mr_v[1, 7] : view<8x8xf32> -> f32
+  %mr_s7_2 = view.load %mr_v[2, 7] : view<8x8xf32> -> f32
+  %mr_s7_3 = view.load %mr_v[3, 7] : view<8x8xf32> -> f32
+  %mr_s7_4 = view.load %mr_v[4, 7] : view<8x8xf32> -> f32
+  %mr_s7_5 = view.load %mr_v[5, 7] : view<8x8xf32> -> f32
+  %mr_s7_6 = view.load %mr_v[6, 7] : view<8x8xf32> -> f32
+  %mr_s7_7 = view.load %mr_v[7, 7] : view<8x8xf32> -> f32
+  %mr_a7_0 = scalar.addf %mr_s7_0, %mr_s7_1 : f32
+  %mr_a7_1 = scalar.addf %mr_s7_2, %mr_s7_3 : f32
+  %mr_a7_2 = scalar.addf %mr_s7_4, %mr_s7_5 : f32
+  %mr_a7_3 = scalar.addf %mr_s7_6, %mr_s7_7 : f32
+  %mr_a7_4 = scalar.addf %mr_a7_0, %mr_a7_1 : f32
+  %mr_a7_5 = scalar.addf %mr_a7_2, %mr_a7_3 : f32
+  %tdt3 = scalar.addf %mr_a7_4, %mr_a7_5 : f32
   %mn0 = scalar.mulf %tsq0, %inv_H : f32
   %vr0 = scalar.addf %mn0, %eps : f32
   %ir0 = scalar.rsqrtf %vr0 : f32
   %sc0_a = scalar.mulf %tdt0, %ir0 : f32
   %sc0 = scalar.mulf %sc0_a, %inv_sqrt_H : f32
-  %tsq1 = kernel.workgroup.reduce<addf> %sq1_2 : f32
-  %tdt1 = kernel.workgroup.reduce<addf> %dt1_2 : f32
   %mn1 = scalar.mulf %tsq1, %inv_H : f32
   %vr1 = scalar.addf %mn1, %eps : f32
   %ir1 = scalar.rsqrtf %vr1 : f32
   %sc1_a = scalar.mulf %tdt1, %ir1 : f32
   %sc1 = scalar.mulf %sc1_a, %inv_sqrt_H : f32
-  %tsq2 = kernel.workgroup.reduce<addf> %sq2_2 : f32
-  %tdt2 = kernel.workgroup.reduce<addf> %dt2_2 : f32
   %mn2 = scalar.mulf %tsq2, %inv_H : f32
   %vr2 = scalar.addf %mn2, %eps : f32
   %ir2 = scalar.rsqrtf %vr2 : f32
   %sc2_a = scalar.mulf %tdt2, %ir2 : f32
   %sc2 = scalar.mulf %sc2_a, %inv_sqrt_H : f32
-  %tsq3 = kernel.workgroup.reduce<addf> %sq3_2 : f32
-  %tdt3 = kernel.workgroup.reduce<addf> %dt3_2 : f32
   %mn3 = scalar.mulf %tsq3, %inv_H : f32
   %vr3 = scalar.addf %mn3, %eps : f32
   %ir3 = scalar.rsqrtf %vr3 : f32
@@ -19841,36 +20165,208 @@ kernel.def export("g_ink_mix5") @g_ink_mix5(%tokens: index, %q_cnt: index) {
   %dt4_0 = vector.dotf<reassoc|contract> %s4_0, %q0, %zero_f : vector<4xf32>, vector<4xf32>, f32
   %dt4_1 = vector.dotf<reassoc|contract> %s4_1, %q1, %dt4_0 : vector<4xf32>, vector<4xf32>, f32
   %dt4_2 = vector.dotf<reassoc|contract> %s4_2, %q2, %dt4_1 : vector<4xf32>, vector<4xf32>, f32
-  %tsq0 = kernel.workgroup.reduce<addf> %sq0_2 : f32
-  %tdt0 = kernel.workgroup.reduce<addf> %dt0_2 : f32
+  // Batched 1-barrier workgroup reduction for all states.
+  %mr_wave_r = kernel.subgroup.id : index
+  %mr_wave = index.assume %mr_wave_r [range(%mr_wave_r, 0, 7)] : index
+  %mr_lane_r = kernel.subgroup.lane.id : index
+  %mr_lane = index.assume %mr_lane_r [range(%mr_lane_r, 0, 31)] : index
+  %mr_bytes = index.constant 320 : offset
+  %mr_lds = buffer.alloca<workgroup> align(16) %mr_bytes : buffer
+  %mr_v = buffer.view %mr_lds[%zero] : buffer -> view<8x10xf32>
+  %mr_w0 = kernel.subgroup.reduce<addf> %sq0_2 : f32
+  %mr_w1 = kernel.subgroup.reduce<addf> %dt0_2 : f32
+  %mr_w2 = kernel.subgroup.reduce<addf> %sq1_2 : f32
+  %mr_w3 = kernel.subgroup.reduce<addf> %dt1_2 : f32
+  %mr_w4 = kernel.subgroup.reduce<addf> %sq2_2 : f32
+  %mr_w5 = kernel.subgroup.reduce<addf> %dt2_2 : f32
+  %mr_w6 = kernel.subgroup.reduce<addf> %sq3_2 : f32
+  %mr_w7 = kernel.subgroup.reduce<addf> %dt3_2 : f32
+  %mr_w8 = kernel.subgroup.reduce<addf> %sq4_2 : f32
+  %mr_w9 = kernel.subgroup.reduce<addf> %dt4_2 : f32
+  %mr_l0 = index.cmp eq, %mr_lane, %c0 : index
+  scf.if %mr_l0 {
+    view.store %mr_w0, %mr_v[%mr_wave, 0] : f32, view<8x10xf32>
+    view.store %mr_w1, %mr_v[%mr_wave, 1] : f32, view<8x10xf32>
+    view.store %mr_w2, %mr_v[%mr_wave, 2] : f32, view<8x10xf32>
+    view.store %mr_w3, %mr_v[%mr_wave, 3] : f32, view<8x10xf32>
+    view.store %mr_w4, %mr_v[%mr_wave, 4] : f32, view<8x10xf32>
+    view.store %mr_w5, %mr_v[%mr_wave, 5] : f32, view<8x10xf32>
+    view.store %mr_w6, %mr_v[%mr_wave, 6] : f32, view<8x10xf32>
+    view.store %mr_w7, %mr_v[%mr_wave, 7] : f32, view<8x10xf32>
+    view.store %mr_w8, %mr_v[%mr_wave, 8] : f32, view<8x10xf32>
+    view.store %mr_w9, %mr_v[%mr_wave, 9] : f32, view<8x10xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %mr_s0_0 = view.load %mr_v[0, 0] : view<8x10xf32> -> f32
+  %mr_s0_1 = view.load %mr_v[1, 0] : view<8x10xf32> -> f32
+  %mr_s0_2 = view.load %mr_v[2, 0] : view<8x10xf32> -> f32
+  %mr_s0_3 = view.load %mr_v[3, 0] : view<8x10xf32> -> f32
+  %mr_s0_4 = view.load %mr_v[4, 0] : view<8x10xf32> -> f32
+  %mr_s0_5 = view.load %mr_v[5, 0] : view<8x10xf32> -> f32
+  %mr_s0_6 = view.load %mr_v[6, 0] : view<8x10xf32> -> f32
+  %mr_s0_7 = view.load %mr_v[7, 0] : view<8x10xf32> -> f32
+  %mr_a0_0 = scalar.addf %mr_s0_0, %mr_s0_1 : f32
+  %mr_a0_1 = scalar.addf %mr_s0_2, %mr_s0_3 : f32
+  %mr_a0_2 = scalar.addf %mr_s0_4, %mr_s0_5 : f32
+  %mr_a0_3 = scalar.addf %mr_s0_6, %mr_s0_7 : f32
+  %mr_a0_4 = scalar.addf %mr_a0_0, %mr_a0_1 : f32
+  %mr_a0_5 = scalar.addf %mr_a0_2, %mr_a0_3 : f32
+  %tsq0 = scalar.addf %mr_a0_4, %mr_a0_5 : f32
+  %mr_s1_0 = view.load %mr_v[0, 1] : view<8x10xf32> -> f32
+  %mr_s1_1 = view.load %mr_v[1, 1] : view<8x10xf32> -> f32
+  %mr_s1_2 = view.load %mr_v[2, 1] : view<8x10xf32> -> f32
+  %mr_s1_3 = view.load %mr_v[3, 1] : view<8x10xf32> -> f32
+  %mr_s1_4 = view.load %mr_v[4, 1] : view<8x10xf32> -> f32
+  %mr_s1_5 = view.load %mr_v[5, 1] : view<8x10xf32> -> f32
+  %mr_s1_6 = view.load %mr_v[6, 1] : view<8x10xf32> -> f32
+  %mr_s1_7 = view.load %mr_v[7, 1] : view<8x10xf32> -> f32
+  %mr_a1_0 = scalar.addf %mr_s1_0, %mr_s1_1 : f32
+  %mr_a1_1 = scalar.addf %mr_s1_2, %mr_s1_3 : f32
+  %mr_a1_2 = scalar.addf %mr_s1_4, %mr_s1_5 : f32
+  %mr_a1_3 = scalar.addf %mr_s1_6, %mr_s1_7 : f32
+  %mr_a1_4 = scalar.addf %mr_a1_0, %mr_a1_1 : f32
+  %mr_a1_5 = scalar.addf %mr_a1_2, %mr_a1_3 : f32
+  %tdt0 = scalar.addf %mr_a1_4, %mr_a1_5 : f32
+  %mr_s2_0 = view.load %mr_v[0, 2] : view<8x10xf32> -> f32
+  %mr_s2_1 = view.load %mr_v[1, 2] : view<8x10xf32> -> f32
+  %mr_s2_2 = view.load %mr_v[2, 2] : view<8x10xf32> -> f32
+  %mr_s2_3 = view.load %mr_v[3, 2] : view<8x10xf32> -> f32
+  %mr_s2_4 = view.load %mr_v[4, 2] : view<8x10xf32> -> f32
+  %mr_s2_5 = view.load %mr_v[5, 2] : view<8x10xf32> -> f32
+  %mr_s2_6 = view.load %mr_v[6, 2] : view<8x10xf32> -> f32
+  %mr_s2_7 = view.load %mr_v[7, 2] : view<8x10xf32> -> f32
+  %mr_a2_0 = scalar.addf %mr_s2_0, %mr_s2_1 : f32
+  %mr_a2_1 = scalar.addf %mr_s2_2, %mr_s2_3 : f32
+  %mr_a2_2 = scalar.addf %mr_s2_4, %mr_s2_5 : f32
+  %mr_a2_3 = scalar.addf %mr_s2_6, %mr_s2_7 : f32
+  %mr_a2_4 = scalar.addf %mr_a2_0, %mr_a2_1 : f32
+  %mr_a2_5 = scalar.addf %mr_a2_2, %mr_a2_3 : f32
+  %tsq1 = scalar.addf %mr_a2_4, %mr_a2_5 : f32
+  %mr_s3_0 = view.load %mr_v[0, 3] : view<8x10xf32> -> f32
+  %mr_s3_1 = view.load %mr_v[1, 3] : view<8x10xf32> -> f32
+  %mr_s3_2 = view.load %mr_v[2, 3] : view<8x10xf32> -> f32
+  %mr_s3_3 = view.load %mr_v[3, 3] : view<8x10xf32> -> f32
+  %mr_s3_4 = view.load %mr_v[4, 3] : view<8x10xf32> -> f32
+  %mr_s3_5 = view.load %mr_v[5, 3] : view<8x10xf32> -> f32
+  %mr_s3_6 = view.load %mr_v[6, 3] : view<8x10xf32> -> f32
+  %mr_s3_7 = view.load %mr_v[7, 3] : view<8x10xf32> -> f32
+  %mr_a3_0 = scalar.addf %mr_s3_0, %mr_s3_1 : f32
+  %mr_a3_1 = scalar.addf %mr_s3_2, %mr_s3_3 : f32
+  %mr_a3_2 = scalar.addf %mr_s3_4, %mr_s3_5 : f32
+  %mr_a3_3 = scalar.addf %mr_s3_6, %mr_s3_7 : f32
+  %mr_a3_4 = scalar.addf %mr_a3_0, %mr_a3_1 : f32
+  %mr_a3_5 = scalar.addf %mr_a3_2, %mr_a3_3 : f32
+  %tdt1 = scalar.addf %mr_a3_4, %mr_a3_5 : f32
+  %mr_s4_0 = view.load %mr_v[0, 4] : view<8x10xf32> -> f32
+  %mr_s4_1 = view.load %mr_v[1, 4] : view<8x10xf32> -> f32
+  %mr_s4_2 = view.load %mr_v[2, 4] : view<8x10xf32> -> f32
+  %mr_s4_3 = view.load %mr_v[3, 4] : view<8x10xf32> -> f32
+  %mr_s4_4 = view.load %mr_v[4, 4] : view<8x10xf32> -> f32
+  %mr_s4_5 = view.load %mr_v[5, 4] : view<8x10xf32> -> f32
+  %mr_s4_6 = view.load %mr_v[6, 4] : view<8x10xf32> -> f32
+  %mr_s4_7 = view.load %mr_v[7, 4] : view<8x10xf32> -> f32
+  %mr_a4_0 = scalar.addf %mr_s4_0, %mr_s4_1 : f32
+  %mr_a4_1 = scalar.addf %mr_s4_2, %mr_s4_3 : f32
+  %mr_a4_2 = scalar.addf %mr_s4_4, %mr_s4_5 : f32
+  %mr_a4_3 = scalar.addf %mr_s4_6, %mr_s4_7 : f32
+  %mr_a4_4 = scalar.addf %mr_a4_0, %mr_a4_1 : f32
+  %mr_a4_5 = scalar.addf %mr_a4_2, %mr_a4_3 : f32
+  %tsq2 = scalar.addf %mr_a4_4, %mr_a4_5 : f32
+  %mr_s5_0 = view.load %mr_v[0, 5] : view<8x10xf32> -> f32
+  %mr_s5_1 = view.load %mr_v[1, 5] : view<8x10xf32> -> f32
+  %mr_s5_2 = view.load %mr_v[2, 5] : view<8x10xf32> -> f32
+  %mr_s5_3 = view.load %mr_v[3, 5] : view<8x10xf32> -> f32
+  %mr_s5_4 = view.load %mr_v[4, 5] : view<8x10xf32> -> f32
+  %mr_s5_5 = view.load %mr_v[5, 5] : view<8x10xf32> -> f32
+  %mr_s5_6 = view.load %mr_v[6, 5] : view<8x10xf32> -> f32
+  %mr_s5_7 = view.load %mr_v[7, 5] : view<8x10xf32> -> f32
+  %mr_a5_0 = scalar.addf %mr_s5_0, %mr_s5_1 : f32
+  %mr_a5_1 = scalar.addf %mr_s5_2, %mr_s5_3 : f32
+  %mr_a5_2 = scalar.addf %mr_s5_4, %mr_s5_5 : f32
+  %mr_a5_3 = scalar.addf %mr_s5_6, %mr_s5_7 : f32
+  %mr_a5_4 = scalar.addf %mr_a5_0, %mr_a5_1 : f32
+  %mr_a5_5 = scalar.addf %mr_a5_2, %mr_a5_3 : f32
+  %tdt2 = scalar.addf %mr_a5_4, %mr_a5_5 : f32
+  %mr_s6_0 = view.load %mr_v[0, 6] : view<8x10xf32> -> f32
+  %mr_s6_1 = view.load %mr_v[1, 6] : view<8x10xf32> -> f32
+  %mr_s6_2 = view.load %mr_v[2, 6] : view<8x10xf32> -> f32
+  %mr_s6_3 = view.load %mr_v[3, 6] : view<8x10xf32> -> f32
+  %mr_s6_4 = view.load %mr_v[4, 6] : view<8x10xf32> -> f32
+  %mr_s6_5 = view.load %mr_v[5, 6] : view<8x10xf32> -> f32
+  %mr_s6_6 = view.load %mr_v[6, 6] : view<8x10xf32> -> f32
+  %mr_s6_7 = view.load %mr_v[7, 6] : view<8x10xf32> -> f32
+  %mr_a6_0 = scalar.addf %mr_s6_0, %mr_s6_1 : f32
+  %mr_a6_1 = scalar.addf %mr_s6_2, %mr_s6_3 : f32
+  %mr_a6_2 = scalar.addf %mr_s6_4, %mr_s6_5 : f32
+  %mr_a6_3 = scalar.addf %mr_s6_6, %mr_s6_7 : f32
+  %mr_a6_4 = scalar.addf %mr_a6_0, %mr_a6_1 : f32
+  %mr_a6_5 = scalar.addf %mr_a6_2, %mr_a6_3 : f32
+  %tsq3 = scalar.addf %mr_a6_4, %mr_a6_5 : f32
+  %mr_s7_0 = view.load %mr_v[0, 7] : view<8x10xf32> -> f32
+  %mr_s7_1 = view.load %mr_v[1, 7] : view<8x10xf32> -> f32
+  %mr_s7_2 = view.load %mr_v[2, 7] : view<8x10xf32> -> f32
+  %mr_s7_3 = view.load %mr_v[3, 7] : view<8x10xf32> -> f32
+  %mr_s7_4 = view.load %mr_v[4, 7] : view<8x10xf32> -> f32
+  %mr_s7_5 = view.load %mr_v[5, 7] : view<8x10xf32> -> f32
+  %mr_s7_6 = view.load %mr_v[6, 7] : view<8x10xf32> -> f32
+  %mr_s7_7 = view.load %mr_v[7, 7] : view<8x10xf32> -> f32
+  %mr_a7_0 = scalar.addf %mr_s7_0, %mr_s7_1 : f32
+  %mr_a7_1 = scalar.addf %mr_s7_2, %mr_s7_3 : f32
+  %mr_a7_2 = scalar.addf %mr_s7_4, %mr_s7_5 : f32
+  %mr_a7_3 = scalar.addf %mr_s7_6, %mr_s7_7 : f32
+  %mr_a7_4 = scalar.addf %mr_a7_0, %mr_a7_1 : f32
+  %mr_a7_5 = scalar.addf %mr_a7_2, %mr_a7_3 : f32
+  %tdt3 = scalar.addf %mr_a7_4, %mr_a7_5 : f32
+  %mr_s8_0 = view.load %mr_v[0, 8] : view<8x10xf32> -> f32
+  %mr_s8_1 = view.load %mr_v[1, 8] : view<8x10xf32> -> f32
+  %mr_s8_2 = view.load %mr_v[2, 8] : view<8x10xf32> -> f32
+  %mr_s8_3 = view.load %mr_v[3, 8] : view<8x10xf32> -> f32
+  %mr_s8_4 = view.load %mr_v[4, 8] : view<8x10xf32> -> f32
+  %mr_s8_5 = view.load %mr_v[5, 8] : view<8x10xf32> -> f32
+  %mr_s8_6 = view.load %mr_v[6, 8] : view<8x10xf32> -> f32
+  %mr_s8_7 = view.load %mr_v[7, 8] : view<8x10xf32> -> f32
+  %mr_a8_0 = scalar.addf %mr_s8_0, %mr_s8_1 : f32
+  %mr_a8_1 = scalar.addf %mr_s8_2, %mr_s8_3 : f32
+  %mr_a8_2 = scalar.addf %mr_s8_4, %mr_s8_5 : f32
+  %mr_a8_3 = scalar.addf %mr_s8_6, %mr_s8_7 : f32
+  %mr_a8_4 = scalar.addf %mr_a8_0, %mr_a8_1 : f32
+  %mr_a8_5 = scalar.addf %mr_a8_2, %mr_a8_3 : f32
+  %tsq4 = scalar.addf %mr_a8_4, %mr_a8_5 : f32
+  %mr_s9_0 = view.load %mr_v[0, 9] : view<8x10xf32> -> f32
+  %mr_s9_1 = view.load %mr_v[1, 9] : view<8x10xf32> -> f32
+  %mr_s9_2 = view.load %mr_v[2, 9] : view<8x10xf32> -> f32
+  %mr_s9_3 = view.load %mr_v[3, 9] : view<8x10xf32> -> f32
+  %mr_s9_4 = view.load %mr_v[4, 9] : view<8x10xf32> -> f32
+  %mr_s9_5 = view.load %mr_v[5, 9] : view<8x10xf32> -> f32
+  %mr_s9_6 = view.load %mr_v[6, 9] : view<8x10xf32> -> f32
+  %mr_s9_7 = view.load %mr_v[7, 9] : view<8x10xf32> -> f32
+  %mr_a9_0 = scalar.addf %mr_s9_0, %mr_s9_1 : f32
+  %mr_a9_1 = scalar.addf %mr_s9_2, %mr_s9_3 : f32
+  %mr_a9_2 = scalar.addf %mr_s9_4, %mr_s9_5 : f32
+  %mr_a9_3 = scalar.addf %mr_s9_6, %mr_s9_7 : f32
+  %mr_a9_4 = scalar.addf %mr_a9_0, %mr_a9_1 : f32
+  %mr_a9_5 = scalar.addf %mr_a9_2, %mr_a9_3 : f32
+  %tdt4 = scalar.addf %mr_a9_4, %mr_a9_5 : f32
   %mn0 = scalar.mulf %tsq0, %inv_H : f32
   %vr0 = scalar.addf %mn0, %eps : f32
   %ir0 = scalar.rsqrtf %vr0 : f32
   %sc0_a = scalar.mulf %tdt0, %ir0 : f32
   %sc0 = scalar.mulf %sc0_a, %inv_sqrt_H : f32
-  %tsq1 = kernel.workgroup.reduce<addf> %sq1_2 : f32
-  %tdt1 = kernel.workgroup.reduce<addf> %dt1_2 : f32
   %mn1 = scalar.mulf %tsq1, %inv_H : f32
   %vr1 = scalar.addf %mn1, %eps : f32
   %ir1 = scalar.rsqrtf %vr1 : f32
   %sc1_a = scalar.mulf %tdt1, %ir1 : f32
   %sc1 = scalar.mulf %sc1_a, %inv_sqrt_H : f32
-  %tsq2 = kernel.workgroup.reduce<addf> %sq2_2 : f32
-  %tdt2 = kernel.workgroup.reduce<addf> %dt2_2 : f32
   %mn2 = scalar.mulf %tsq2, %inv_H : f32
   %vr2 = scalar.addf %mn2, %eps : f32
   %ir2 = scalar.rsqrtf %vr2 : f32
   %sc2_a = scalar.mulf %tdt2, %ir2 : f32
   %sc2 = scalar.mulf %sc2_a, %inv_sqrt_H : f32
-  %tsq3 = kernel.workgroup.reduce<addf> %sq3_2 : f32
-  %tdt3 = kernel.workgroup.reduce<addf> %dt3_2 : f32
   %mn3 = scalar.mulf %tsq3, %inv_H : f32
   %vr3 = scalar.addf %mn3, %eps : f32
   %ir3 = scalar.rsqrtf %vr3 : f32
   %sc3_a = scalar.mulf %tdt3, %ir3 : f32
   %sc3 = scalar.mulf %sc3_a, %inv_sqrt_H : f32
-  %tsq4 = kernel.workgroup.reduce<addf> %sq4_2 : f32
-  %tdt4 = kernel.workgroup.reduce<addf> %dt4_2 : f32
   %mn4 = scalar.mulf %tsq4, %inv_H : f32
   %vr4 = scalar.addf %mn4, %eps : f32
   %ir4 = scalar.rsqrtf %vr4 : f32
@@ -20130,6 +20626,7 @@ kernel.def export("g_ink_rms_norm_plane_f16") @g_ink_rms_norm_plane_f16(%tokens:
 }
 
 
+// Single-pass register-cached concat RMS norm with 1-barrier batched reduction.
 kernel.def export("g_ink_concat_rms") @g_ink_concat_rms(%tokens: index) {
   %c1 = index.constant 1 : index
   %c256 = index.constant 256 : index
@@ -20144,26 +20641,86 @@ kernel.def export("g_ink_concat_rms") @g_ink_concat_rms(%tokens: index) {
   %tok = index.assume %tok_id [lt(%tok_id, %tokens)] : index
   %tid_raw = kernel.workitem.id<x> : index
   %tid = index.assume %tid_raw [range(%tid_raw, 0, 255)] : index
+  %wave_raw = kernel.subgroup.id : index
+  %wave = index.assume %wave_raw [range(%wave_raw, 0, 7)] : index
+  %lane_raw = kernel.subgroup.lane.id : index
+  %lane = index.assume %lane_raw [range(%lane_raw, 0, 31)] : index
   %c0 = index.constant 0 : index
   %c256 = index.constant 256 : index
+  %c512 = index.constant 512 : index
   %cH4 = index.constant 576 : index
   %zero = index.constant 0 : offset
   %zero_f = scalar.constant 0.0 : f32
+  %zero4 = vector.splatf 0.0 : vector<4xf32>
   %eps = scalar.constant 9.999999974752427e-07 : f32
   %inv_H = scalar.constant 0.00043402777777777775 : f32
   %cv = buffer.view %cur[%zero] : buffer -> view<[%cp]x[%tokens]x576x4xf32>
   %mv = buffer.view %msg[%zero] : buffer -> view<[%mp]x[%tokens]x576x4xf32>
   %ov = buffer.view %out[%zero] : buffer -> view<[%tokens]x1152x4xf32>
-  %sq_c, %sq_m = scf.for %i = [%tid to %cH4 step %c256](%ac = %zero_f : f32, %am = %zero_f : f32) -> (f32, f32) {
-    %ch = index.assume %i [range(%i, 0, 575)] : index
-    %xc = vector.load %cv[%ci, %tok, %ch, %c0] : view<[%cp]x[%tokens]x576x4xf32> -> vector<4xf32>
-    %xm = vector.load %mv[%mi, %tok, %ch, %c0] : view<[%mp]x[%tokens]x576x4xf32> -> vector<4xf32>
-    %nc = vector.dotf<reassoc|contract> %xc, %xc, %ac : vector<4xf32>, vector<4xf32>, f32
-    %nm = vector.dotf<reassoc|contract> %xm, %xm, %am : vector<4xf32>, vector<4xf32>, f32
-    scf.yield %nc, %nm : f32, f32
+  %i0 = index.assume %tid [range(%tid, 0, 575)] : index
+  %i1_raw = index.add %tid, %c256 : index
+  %i1 = index.assume %i1_raw [range(%i1_raw, 0, 575)] : index
+  %i2_raw = index.add %tid, %c512 : index
+  %has2 = index.cmp ult, %i2_raw, %cH4 : index
+  %xc0 = vector.load %cv[%ci, %tok, %i0, %c0] : view<[%cp]x[%tokens]x576x4xf32> -> vector<4xf32>
+  %xm0 = vector.load %mv[%mi, %tok, %i0, %c0] : view<[%mp]x[%tokens]x576x4xf32> -> vector<4xf32>
+  %xc1 = vector.load %cv[%ci, %tok, %i1, %c0] : view<[%cp]x[%tokens]x576x4xf32> -> vector<4xf32>
+  %xm1 = vector.load %mv[%mi, %tok, %i1, %c0] : view<[%mp]x[%tokens]x576x4xf32> -> vector<4xf32>
+  %xc2, %xm2 = scf.if %has2 -> (vector<4xf32>, vector<4xf32>) {
+    %i2 = index.assume %i2_raw [range(%i2_raw, 0, 575)] : index
+    %a = vector.load %cv[%ci, %tok, %i2, %c0] : view<[%cp]x[%tokens]x576x4xf32> -> vector<4xf32>
+    %b = vector.load %mv[%mi, %tok, %i2, %c0] : view<[%mp]x[%tokens]x576x4xf32> -> vector<4xf32>
+    scf.yield %a, %b : vector<4xf32>, vector<4xf32>
+  } else {
+    scf.yield %zero4, %zero4 : vector<4xf32>, vector<4xf32>
   }
-  %tot_c = kernel.workgroup.reduce<addf> %sq_c : f32
-  %tot_m = kernel.workgroup.reduce<addf> %sq_m : f32
+  %sc0 = vector.dotf<reassoc|contract> %xc0, %xc0, %zero_f : vector<4xf32>, vector<4xf32>, f32
+  %sc1 = vector.dotf<reassoc|contract> %xc1, %xc1, %sc0 : vector<4xf32>, vector<4xf32>, f32
+  %sc2 = vector.dotf<reassoc|contract> %xc2, %xc2, %sc1 : vector<4xf32>, vector<4xf32>, f32
+  %sm0 = vector.dotf<reassoc|contract> %xm0, %xm0, %zero_f : vector<4xf32>, vector<4xf32>, f32
+  %sm1 = vector.dotf<reassoc|contract> %xm1, %xm1, %sm0 : vector<4xf32>, vector<4xf32>, f32
+  %sm2 = vector.dotf<reassoc|contract> %xm2, %xm2, %sm1 : vector<4xf32>, vector<4xf32>, f32
+  %wc = kernel.subgroup.reduce<addf> %sc2 : f32
+  %wm = kernel.subgroup.reduce<addf> %sm2 : f32
+  %rb = index.constant 64 : offset
+  %rlds = buffer.alloca<workgroup> align(16) %rb : buffer
+  %rv = buffer.view %rlds[%zero] : buffer -> view<8x2xf32>
+  %is_l0 = index.cmp eq, %lane, %c0 : index
+  scf.if %is_l0 {
+    view.store %wc, %rv[%wave, 0] : f32, view<8x2xf32>
+    view.store %wm, %rv[%wave, 1] : f32, view<8x2xf32>
+  }
+  kernel.barrier<workgroup> scope(workgroup) ordering(acq_rel)
+  %c_0 = view.load %rv[0, 0] : view<8x2xf32> -> f32
+  %c_1 = view.load %rv[1, 0] : view<8x2xf32> -> f32
+  %c_2 = view.load %rv[2, 0] : view<8x2xf32> -> f32
+  %c_3 = view.load %rv[3, 0] : view<8x2xf32> -> f32
+  %c_4 = view.load %rv[4, 0] : view<8x2xf32> -> f32
+  %c_5 = view.load %rv[5, 0] : view<8x2xf32> -> f32
+  %c_6 = view.load %rv[6, 0] : view<8x2xf32> -> f32
+  %c_7 = view.load %rv[7, 0] : view<8x2xf32> -> f32
+  %cs0 = scalar.addf %c_0, %c_1 : f32
+  %cs1 = scalar.addf %c_2, %c_3 : f32
+  %cs2 = scalar.addf %c_4, %c_5 : f32
+  %cs3 = scalar.addf %c_6, %c_7 : f32
+  %cs4 = scalar.addf %cs0, %cs1 : f32
+  %cs5 = scalar.addf %cs2, %cs3 : f32
+  %tot_c = scalar.addf %cs4, %cs5 : f32
+  %m_0 = view.load %rv[0, 1] : view<8x2xf32> -> f32
+  %m_1 = view.load %rv[1, 1] : view<8x2xf32> -> f32
+  %m_2 = view.load %rv[2, 1] : view<8x2xf32> -> f32
+  %m_3 = view.load %rv[3, 1] : view<8x2xf32> -> f32
+  %m_4 = view.load %rv[4, 1] : view<8x2xf32> -> f32
+  %m_5 = view.load %rv[5, 1] : view<8x2xf32> -> f32
+  %m_6 = view.load %rv[6, 1] : view<8x2xf32> -> f32
+  %m_7 = view.load %rv[7, 1] : view<8x2xf32> -> f32
+  %ms0 = scalar.addf %m_0, %m_1 : f32
+  %ms1 = scalar.addf %m_2, %m_3 : f32
+  %ms2 = scalar.addf %m_4, %m_5 : f32
+  %ms3 = scalar.addf %m_6, %m_7 : f32
+  %ms4 = scalar.addf %ms0, %ms1 : f32
+  %ms5 = scalar.addf %ms2, %ms3 : f32
+  %tot_m = scalar.addf %ms4, %ms5 : f32
   %mc = scalar.mulf %tot_c, %inv_H : f32
   %mm = scalar.mulf %tot_m, %inv_H : f32
   %vc = scalar.addf %mc, %eps : f32
@@ -20172,24 +20729,35 @@ kernel.def export("g_ink_concat_rms") @g_ink_concat_rms(%tokens: index) {
   %irm = scalar.rsqrtf %vm : f32
   %irc4 = vector.splat %irc : vector<4xf32>
   %irm4 = vector.splat %irm : vector<4xf32>
-  scf.for %i = [%tid to %cH4 step %c256] {
-    %ch = index.assume %i [range(%i, 0, 575)] : index
-    %ch2_v = index.add %ch, %cH4 : index
-    %ch2 = index.assume %ch2_v [range(%ch2_v, 576, 1151)] : index
-    %xc = vector.load %cv[%ci, %tok, %ch, %c0] : view<[%cp]x[%tokens]x576x4xf32> -> vector<4xf32>
-    %xm = vector.load %mv[%mi, %tok, %ch, %c0] : view<[%mp]x[%tokens]x576x4xf32> -> vector<4xf32>
-    %yc = vector.mulf %xc, %irc4 : vector<4xf32>
-    %ym = vector.mulf %xm, %irm4 : vector<4xf32>
-    vector.store %yc, %ov[%tok, %ch, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
-    vector.store %ym, %ov[%tok, %ch2, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
+  %yc0 = vector.mulf %xc0, %irc4 : vector<4xf32>
+  %ym0 = vector.mulf %xm0, %irm4 : vector<4xf32>
+  %i0_m_v = index.add %i0, %cH4 : index
+  %i0_m = index.assume %i0_m_v [range(%i0_m_v, 576, 1151)] : index
+  vector.store %yc0, %ov[%tok, %i0, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
+  vector.store %ym0, %ov[%tok, %i0_m, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
+  %yc1 = vector.mulf %xc1, %irc4 : vector<4xf32>
+  %ym1 = vector.mulf %xm1, %irm4 : vector<4xf32>
+  %i1_m_v = index.add %i1, %cH4 : index
+  %i1_m = index.assume %i1_m_v [range(%i1_m_v, 576, 1151)] : index
+  vector.store %yc1, %ov[%tok, %i1, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
+  vector.store %ym1, %ov[%tok, %i1_m, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
+  scf.if %has2 {
+    %i2 = index.assume %i2_raw [range(%i2_raw, 0, 575)] : index
+    %i2_m_v = index.add %i2, %cH4 : index
+    %i2_m = index.assume %i2_m_v [range(%i2_m_v, 576, 1151)] : index
+    %yc2 = vector.mulf %xc2, %irc4 : vector<4xf32>
+    %ym2 = vector.mulf %xm2, %irm4 : vector<4xf32>
+    vector.store %yc2, %ov[%tok, %i2, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
+    vector.store %ym2, %ov[%tok, %i2_m, %c0] : vector<4xf32>, view<[%tokens]x1152x4xf32>
   }
   kernel.return
 }
 
+// Coalesced controller apply: 16 lanes/channel (4 channels/WG = 576 WGs), 16-byte coalesced loads, 0 LDS/barriers.
 kernel.def export("g_ink_ctrl_apply") @g_ink_ctrl_apply(%tokens: index) {
   %c1 = index.constant 1 : index
   %c64 = index.constant 64 : index
-  %cb = index.constant 36 : index
+  %cb = index.constant 576 : index
   kernel.launch.config workgroups(%tokens, %cb, %c1) workgroup_size(%c64, %c1, %c1) : index
 } launch(%tokens_arg: index, %c_planes_arg: index, %c_idx_arg: index, %m_planes_arg: index, %m_idx_arg: index, %cur: buffer, %msg: buffer, %z: buffer, %w_gain: buffer, %w_forget: buffer, %out: buffer) {
   %tokens = index.assume %tokens_arg [range(%tokens_arg, 1, 8192)] : index
@@ -20199,36 +20767,56 @@ kernel.def export("g_ink_ctrl_apply") @g_ink_ctrl_apply(%tokens: index) {
   %mi = index.assume %m_idx_arg [range(%m_idx_arg, 0, 3), lt(%m_idx_arg, %mp)] : index
   %tok_id = kernel.workgroup.id<x> : index
   %tok = index.assume %tok_id [lt(%tok_id, %tokens)] : index
-  %blk = kernel.workgroup.id<y> : index
-  %tid = kernel.workitem.id<x> : index
-  %c64 = index.constant 64 : index
-  %cH = index.constant 2304 : index
-  %off_b = index.mul %blk, %c64 : index
-  %c_raw = index.add %off_b, %tid : index
-  %in = index.cmp ult, %c_raw, %cH : index
-  scf.if %in {
-    %ch = index.assume %c_raw [range(%c_raw, 0, 2303)] : index
-    %zero = index.constant 0 : offset
-    %zero_f = scalar.constant 0.0 : f32
-    %one_f = scalar.constant 1.0 : f32
-    %c0 = index.constant 0 : index
-    %c1 = index.constant 1 : index
-    %zv = buffer.view %z[%zero] : buffer -> view<[%tokens]x2x32xf32>
-    %wgv = buffer.view %w_gain[%zero] : buffer -> view<2304x2x32xf32>
-    %wfv = buffer.view %w_forget[%zero] : buffer -> view<2304x2x32xf32>
+  %blk_id = kernel.workgroup.id<y> : index
+  %blk = index.assume %blk_id [range(%blk_id, 0, 575)] : index
+  %tid_raw = kernel.workitem.id<x> : index
+  %tid = index.assume %tid_raw [range(%tid_raw, 0, 63)] : index
+  %c0 = index.constant 0 : index
+  %c4 = index.constant 4 : index
+  %c16 = index.constant 16 : index
+  %zero = index.constant 0 : offset
+  %zero_f = scalar.constant 0.0 : f32
+  %one_f = scalar.constant 1.0 : f32
+  %x1 = scalar.constant 1 : i32
+  %x2 = scalar.constant 2 : i32
+  %x4 = scalar.constant 4 : i32
+  %x8 = scalar.constant 8 : i32
+  %w32 = scalar.constant 32 : i32
+  %ch_loc = index.div %tid, %c16 : index
+  %sub_v = index.rem %tid, %c16 : index
+  %sub = index.assume %sub_v [range(%sub_v, 0, 15)] : index
+  %ch_base = index.mul %blk, %c4 : index
+  %ch_raw = index.add %ch_base, %ch_loc : index
+  %ch = index.assume %ch_raw [range(%ch_raw, 0, 2303)] : index
+  %zv = buffer.view %z[%zero] : buffer -> view<[%tokens]x16x4xf32>
+  %wgv = buffer.view %w_gain[%zero] : buffer -> view<2304x16x4xf32>
+  %wfv = buffer.view %w_forget[%zero] : buffer -> view<2304x16x4xf32>
+  %z4 = vector.load %zv[%tok, %sub, %c0] : view<[%tokens]x16x4xf32> -> vector<4xf32>
+  %g4 = vector.load %wgv[%ch, %sub, %c0] : view<2304x16x4xf32> -> vector<4xf32>
+  %f4 = vector.load %wfv[%ch, %sub, %c0] : view<2304x16x4xf32> -> vector<4xf32>
+  %gd0 = vector.dotf<reassoc|contract> %g4, %z4, %zero_f : vector<4xf32>, vector<4xf32>, f32
+  %fd0 = vector.dotf<reassoc|contract> %f4, %z4, %zero_f : vector<4xf32>, vector<4xf32>, f32
+  %gd1r, %gd1u = kernel.subgroup.shuffle<xor> %gd0, %x1, %w32 : f32, i32, i32
+  %gd1 = scalar.addf %gd0, %gd1r : f32
+  %gd2r, %gd2u = kernel.subgroup.shuffle<xor> %gd1, %x2, %w32 : f32, i32, i32
+  %gd2 = scalar.addf %gd1, %gd2r : f32
+  %gd4r, %gd4u = kernel.subgroup.shuffle<xor> %gd2, %x4, %w32 : f32, i32, i32
+  %gd4 = scalar.addf %gd2, %gd4r : f32
+  %gd8r, %gd8u = kernel.subgroup.shuffle<xor> %gd4, %x8, %w32 : f32, i32, i32
+  %gd = scalar.addf %gd4, %gd8r : f32
+  %fd1r, %fd1u = kernel.subgroup.shuffle<xor> %fd0, %x1, %w32 : f32, i32, i32
+  %fd1 = scalar.addf %fd0, %fd1r : f32
+  %fd2r, %fd2u = kernel.subgroup.shuffle<xor> %fd1, %x2, %w32 : f32, i32, i32
+  %fd2 = scalar.addf %fd1, %fd2r : f32
+  %fd4r, %fd4u = kernel.subgroup.shuffle<xor> %fd2, %x4, %w32 : f32, i32, i32
+  %fd4 = scalar.addf %fd2, %fd4r : f32
+  %fd8r, %fd8u = kernel.subgroup.shuffle<xor> %fd4, %x8, %w32 : f32, i32, i32
+  %fd = scalar.addf %fd4, %fd8r : f32
+  %is_lead = index.cmp eq, %sub, %c0 : index
+  scf.if %is_lead {
     %cv = buffer.view %cur[%zero] : buffer -> view<[%cp]x[%tokens]x2304xf32>
     %mv = buffer.view %msg[%zero] : buffer -> view<[%mp]x[%tokens]x2304xf32>
     %ov = buffer.view %out[%zero] : buffer -> view<[%tokens]x2304xf32>
-    %z0 = vector.load %zv[%tok, %c0, %c0] : view<[%tokens]x2x32xf32> -> vector<32xf32>
-    %z1 = vector.load %zv[%tok, %c1, %c0] : view<[%tokens]x2x32xf32> -> vector<32xf32>
-    %g0 = vector.load %wgv[%ch, %c0, %c0] : view<2304x2x32xf32> -> vector<32xf32>
-    %g1 = vector.load %wgv[%ch, %c1, %c0] : view<2304x2x32xf32> -> vector<32xf32>
-    %f0 = vector.load %wfv[%ch, %c0, %c0] : view<2304x2x32xf32> -> vector<32xf32>
-    %f1 = vector.load %wfv[%ch, %c1, %c0] : view<2304x2x32xf32> -> vector<32xf32>
-    %gd0 = vector.dotf<reassoc|contract> %g0, %z0, %zero_f : vector<32xf32>, vector<32xf32>, f32
-    %gd = vector.dotf<reassoc|contract> %g1, %z1, %gd0 : vector<32xf32>, vector<32xf32>, f32
-    %fd0 = vector.dotf<reassoc|contract> %f0, %z0, %zero_f : vector<32xf32>, vector<32xf32>, f32
-    %fd = vector.dotf<reassoc|contract> %f1, %z1, %fd0 : vector<32xf32>, vector<32xf32>, f32
     %gain = scalar.tanhf<afn> %gd : f32
     %forget = scalar.tanhf<afn> %fd : f32
     %keep = scalar.subf %one_f, %forget : f32

@@ -46,7 +46,7 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 | A4 | go to Verify | | |
 
 ## Path B (stock upstream checkout, PR not merged)
-Fetch seven files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `tools/gen_swa_v2.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
+Fetch eight files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen_flash2_multi.py`, `tools/gen_fuse_nq.py`, `tools/gen_moe_f16_act.py`, `tools/gen_swa_v2.py`, `tools/gen_small_decode.py`, `bin/proxy.py`, `tools/verify_r9700.py`.
 | # | run | expect | on fail |
 |--|--|--|--|
 | B1 | `sha256sum package/program/llm.loom` | starts `4429a038eb9a30fb` (upstream 72294fb) or another stock hash | continue; B2 decides |
@@ -55,7 +55,8 @@ Fetch seven files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/gen
 | B2c | `python3 -I tools/gen_fuse_nq.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (fused norm+q8, recommended) | stderr mentions `g_ink_rms_norm_plane_q8x` | `ValueError`: skip B2c and report |
 | B2d | `python3 -I tools/gen_moe_f16_act.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (direct f16 MoE act, recommended) | stderr mentions `removed 96 g_row_scale_f16_tiles` | `ValueError`: skip B2d and report |
 | B2e | `python3 -I tools/gen_swa_v2.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (SWA decode v2, recommended) | stderr mentions `g_ink_attn_split_swa_span_v2` | `ValueError`: skip B2e and report |
-| B3 | `sha256sum /tmp/llm.v2.loom` | starts `16b3c7c20523ae04` (`7617edbcaa80e50f` without B2e, `cdb6a1894f000744` without B2d/B2e) when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
+| B2f | `python3 -I tools/gen_small_decode.py /tmp/llm.v2.loom /tmp/llm.v2.loom` (small decode kernels, recommended) | stderr mentions `g_ink_ctrl_apply` | `ValueError`: skip B2f and report |
+| B3 | `sha256sum /tmp/llm.v2.loom` | starts `792ce64d808d823c` (`16b3c7c20523ae04` without B2f, `7617edbcaa80e50f` without B2e/B2f) when B1 was `4429a038...` | another B1 hash gives another output; continue, Verify decides |
 | B4 | `cp package/program/llm.loom /tmp/llm.stock.loom && cp /tmp/llm.v2.loom package/program/llm.loom && cp package/program/llm.loom "$HOME_DIR/model/program/llm.loom"` | files copied | — |
 | B5 | `cp bin/proxy.py /tmp/proxy.stock.py`, then put the fork's `bin/proxy.py` in place | — | — |
 | B6 | (C, optional) apply the card settings below to `"$HOME_DIR/model/model.json"` (or a copy passed to `--model`) and the proxy env vars to the proxy process | — | — |
