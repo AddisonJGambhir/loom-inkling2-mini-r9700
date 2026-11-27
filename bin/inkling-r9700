@@ -9,7 +9,7 @@
 #      INKLING_LOOM_VERSION (default 0.3.0; 0.2.0 also supported), INKLING_SPIN_NS (default 500000),
 #      INKLING_PROFILE: "default" (1 chat, 448K, drafter on) or "concurrent" (up to 4 chats x 262K, drafter off, proxy KV
 #      budget guard + engine-level decode priority + system-prompt checkpoints; INKLING_CTX / INKLING_TOKEN_BUDGET /
-#      INKLING_SESSION_CACHE / INKLING_DECODE_PRIORITY override 262144 / 450000 / 0 / 0).
+#      INKLING_SESSION_CACHE / INKLING_DECODE_PRIORITY override 262144 / 520000 / 0 / 0).
 set -u
 HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 H="${INKLING_HOME:-$HOME/.local/share/inkling-r9700}"
@@ -75,7 +75,7 @@ ex.update(rows=4, max_sessions=4, context_capacity=int(sys.argv[3]), max_tokens=
           prefix_cache_capacity=0, session_cache_capacity=int(sys.argv[4]), cache_target_bytes=2147483648, checkpoint_capacity=2)
 json.dump(d, open(sys.argv[2], "w"), indent=2)
 PY
-      penv=(-E LOOM_MAX_SESSIONS=4 -E "LOOM_TOKEN_BUDGET=${INKLING_TOKEN_BUDGET:-450000}" -E LOOM_MAX_TOKENS=48000
+      penv=(-E LOOM_MAX_SESSIONS=4 -E "LOOM_TOKEN_BUDGET=${INKLING_TOKEN_BUDGET:-520000}" -E LOOM_MAX_TOKENS=48000
             -E LOOM_CHECKPOINT_CAPACITY=2 -E LOOM_SYS_CHECKPOINT=1
             -E "LOOM_DECODE_PRIORITY=${INKLING_DECODE_PRIORITY:-0}") ;;
     *) die "unknown INKLING_PROFILE '$PROFILE' (default | concurrent)" ;;
