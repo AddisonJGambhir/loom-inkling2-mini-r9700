@@ -13,7 +13,7 @@ Measured on one Radeon AI PRO R9700 (gfx1201, 32 GB, 210 W power cap, also drivi
 | Single-chat decode at 60K / 121K context | 52 / 37 tok/s | **74 / 62 tok/s** |
 | Agent follow-up turn at ~110K context (tool-using agent) | 0% of the prompt reused, 38-58 s to first token | **99%+ reused, ~2 s** |
 | Turn after a screenshot (vision tool result) | full re-read (30-100 s at 80K) | **99.9% reused, ~0.2 s** (optional vision offload) |
-| Concurrent chats | 1 chat (448K) | **up to 4 chats x 262K**, with a memory guard |
+| Concurrent chats | 1 chat (448K) | **up to 4 chats x 384K**, with a memory guard |
 | Cold prompt, time to first token at 130K / 255K | 52 / 150 s | **45 / 119 s** (bit-identical output) |
 
 Short-context decode, short-prompt prefill and 4-chat throughput are unchanged (within ~1%).
@@ -29,7 +29,7 @@ The changes come in three independent parts. You can take any of them:
      image request, so no turn is ever reused;
    - agents often re-serialize the tool-call arguments they send back.
    The proxy also adds an optional memory guard for several chats, optional system-prompt reuse, and optional screenshot handling.
-3. **A multi-chat profile** (`INKLING_PROFILE=concurrent` in `bin/inkling-r9700`): 4 chats x 262K, drafter off, prefix cache off.
+3. **A multi-chat profile** (`INKLING_PROFILE=concurrent` in `bin/inkling-r9700`): 4 chats x 384K, drafter off, prefix cache off.
 
 ## Requirements
 
@@ -94,13 +94,13 @@ alias, tool-argument restore, diagnostics, and a better token estimate for image
 In the model card, under `presets.chat.execution`:
 
 ```json
-"rows": 4, "max_sessions": 4, "context_capacity": 262144, "max_tokens": 48000,
+"rows": 4, "max_sessions": 4, "context_capacity": 393216, "max_tokens": 48000,
 "draft_depth": 0, "prefix_cache_capacity": 0, "session_cache_capacity": 0,
 "cache_target_bytes": 2147483648, "checkpoint_capacity": 2
 ```
 
 For the proxy process, set these environment variables:
-`LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=520000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=0`.
+`LOOM_NCTX=393216 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=520000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=0`.
 They can also go in `proxy.env`.
 
 ## Check it worked

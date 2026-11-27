@@ -42,7 +42,7 @@ K = decode attention v2 kernel, P = proxy fixes, C = concurrent profile (optiona
 |--|--|--|--|
 | A1 | `git clone -b r9700-decode-attn-v2-concurrency https://github.com/NT7S/loom-inkling2-mini-r9700 "$REPO"` (upstream URL if merged) | checkout exists | network/auth: report |
 | A2 | `cd "$REPO" && bin/inkling-r9700 install` | ends with `installed.` | read the error; disk (~20 GB) and glibc >= 2.39 are the usual causes |
-| A3 | `cd "$REPO" && bin/inkling-r9700 stop; INKLING_PROFILE=concurrent bin/inkling-r9700 start` (or no profile for single chat) | `ready ... (concurrent: 262144 ctx, images)` | `journalctl --user -u inkling-backend -n 50`; on INVALID_ARGUMENT, check invariant 3 |
+| A3 | `cd "$REPO" && bin/inkling-r9700 stop; INKLING_PROFILE=concurrent bin/inkling-r9700 start` (or no profile for single chat) | `ready ... (concurrent: 393216 ctx, images)` | `journalctl --user -u inkling-backend -n 50`; on INVALID_ARGUMENT, check invariant 3 |
 | A4 | go to Verify | | |
 
 ## Path B (stock upstream checkout, PR not merged)
@@ -66,8 +66,8 @@ Fetch eleven files from the fork branch: `tools/gen_attn_split_v2.py`, `tools/ge
 | B7 | `bin/inkling-r9700 restart` | `ready` | first start compiles changed kernels (<= 1 min); on `registration failed`, restore B4/B5 backups and report |
 
 Card settings for C (`presets.chat.execution`):
-`rows 4, max_sessions 4, context_capacity 262144, max_tokens 48000, draft_depth 0, prefix_cache_capacity 0, session_cache_capacity 0, cache_target_bytes 2147483648, checkpoint_capacity 2`.
-Proxy env for C: `LOOM_NCTX=262144 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=520000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=0`.
+`rows 4, max_sessions 4, context_capacity 393216, max_tokens 48000, draft_depth 0, prefix_cache_capacity 0, session_cache_capacity 0, cache_target_bytes 2147483648, checkpoint_capacity 2`.
+Proxy env for C: `LOOM_NCTX=393216 LOOM_MAX_SESSIONS=4 LOOM_TOKEN_BUDGET=520000 LOOM_MAX_TOKENS=48000 LOOM_CHECKPOINT_CAPACITY=2 LOOM_SYS_CHECKPOINT=1 LOOM_DECODE_PRIORITY=0`.
 Budget rule: `17.2 GiB + 3.6 GiB + budget x 17.4 KB <= pool - 1.5 GB` (drafter off). Recompute if the pool (`--memory_bytes` / `INKLING_MEMORY`) is not ~31 GB.
 
 ## Optional V: vision offload (only with user consent, invariant 6)

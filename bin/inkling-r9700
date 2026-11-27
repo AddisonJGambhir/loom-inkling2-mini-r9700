@@ -7,9 +7,9 @@
 # Env: INKLING_HOME (default ~/.local/share/inkling-r9700), INKLING_PORT (1234), INKLING_BACKEND_PORT (11437),
 #      INKLING_DEVICE (amdgpu://id/<32 hex>; default: the first gfx1201 GPU), INKLING_MEMORY (Loom pool, default 32256mib),
 #      INKLING_LOOM_VERSION (default 0.3.0; 0.2.0 also supported), INKLING_SPIN_NS (default 500000),
-#      INKLING_PROFILE: "default" (1 chat, 448K, drafter on) or "concurrent" (up to 4 chats x 262K, drafter off, proxy KV
+#      INKLING_PROFILE: "default" (1 chat, 448K, drafter on) or "concurrent" (up to 4 chats x 384K, drafter off, proxy KV
 #      budget guard + engine-level decode priority + system-prompt checkpoints; INKLING_CTX / INKLING_TOKEN_BUDGET /
-#      INKLING_SESSION_CACHE / INKLING_DECODE_PRIORITY override 262144 / 520000 / 0 / 0).
+#      INKLING_SESSION_CACHE / INKLING_DECODE_PRIORITY override 393216 / 520000 / 0 / 0).
 set -u
 HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 H="${INKLING_HOME:-$HOME/.local/share/inkling-r9700}"
@@ -65,7 +65,7 @@ cmd_start() {
       # model if live conversations overcommit it, so the proxy admits chats against a token budget instead.
       # Prefix-cache endpoints are never evicted and block reclaim of idle histories: off. Turn-to-turn reuse comes
       # from the idle rows; new conversations reuse a shared system prompt through proxy-managed checkpoints.
-      nctx="${INKLING_CTX:-262144}"; card="$MODEL/model-concurrent.json"
+      nctx="${INKLING_CTX:-393216}"; card="$MODEL/model-concurrent.json"
       local scache="${INKLING_SESSION_CACHE:-0}"
       python3 -I - "$MODEL/model.json" "$card" "$nctx" "$scache" <<'PY' || die "could not write $card"
 import json, sys
